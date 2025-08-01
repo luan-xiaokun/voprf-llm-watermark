@@ -84,14 +84,17 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help="If set, will overwrite existing output files",
     )
+    parser.add_argument(
+        "--no_watermark",
+        action="store_true",
+        help="If set, will not apply watermarking to the generated text",
+    )
     return parser.parse_args()
 
 
 def get_output_file_name(args) -> str:
     model_name = args.model_path.split("/")[-1]
-    window_size = args.window_size
-    delta = args.delta
-    gamma = args.gamma
+
     do_sample = args.do_sample
     num_beams = args.num_beams
     sampling_method = ""
@@ -110,6 +113,13 @@ def get_output_file_name(args) -> str:
         raise ValueError(
             "Invalid sampling method: must be either greedy, beam, or multinomial"
         )
+
+    if args.no_watermark:
+        return f"{model_name}_{sampling_method}_no_watermark.jsonl"
+
+    window_size = args.window_size
+    delta = args.delta
+    gamma = args.gamma
 
     return f"{model_name}_{sampling_method}_w{window_size}_d{delta}_g{gamma}.jsonl"
 
@@ -159,7 +169,7 @@ def main(args):
     if not args.server_seed:
         print("Generating a new server seed for watermarking")
         server_seed = secrets.token_bytes(32)
-    else:
+    elif args.server_seed:
         print(f"Loading server seed from {args.server_seed}")
         with open(args.server_seed, "r", encoding="utf-8") as f:
             server_seed = bytes.fromhex(f.read().strip())
@@ -192,6 +202,7 @@ def main(args):
                 temperature=args.temperature,
                 suppress_tokens=[tokenizer.eos_token_id] if args.suppress_eos else None,
                 pad_token_id=tokenizer.eos_token_id,
+                no_watermark=args.no_watermark,
             )
             generation_total_time += time.time() - generation_start_time
 

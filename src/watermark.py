@@ -53,6 +53,7 @@ class WatermarkAdapter:
         top_k: int | None = None,
         temperature: float | None = None,
         suppress_tokens: list[int] | None = None,
+        no_watermark: bool = False,
         **model_specific_params,
     ) -> str | list[str]:
         prompts_ = prompts
@@ -75,11 +76,11 @@ class WatermarkAdapter:
         if seed is not None:
             set_seed(seed)
 
-        # currently we do not support top-p sampling
-        if top_p is not None:
-            raise NotImplementedError(
-                "Top-p sampling is not supported in this adapter."
-            )
+        # # currently we do not support top-p sampling for watermarking
+        # if top_p is not None and not no_watermark:
+        #     raise NotImplementedError(
+        #         "Top-p sampling is not supported in this adapter."
+        #     )
 
         # beam search is also not supported, yet
         if num_beams > 1:
@@ -92,7 +93,7 @@ class WatermarkAdapter:
 
         # multinomial sampling
         original_sample = None
-        if top_k is None:
+        if top_k is None and not no_watermark:
             # here, the _sample method of self.model is replaced
             original_sample = replace_with_rejection_sampling_mixin(
                 self.model,
@@ -101,6 +102,22 @@ class WatermarkAdapter:
                 self.gamma,
                 self.voprf_server,
             )
+
+        # prepare for top-k adaptive sampling
+        logits_processor = None
+        if do_sample and top_k is not None and not no_watermark:
+            logits_processor = LogitsProcessorList(
+                [
+                    TopkAdaptiveLogitsProcessor(
+                        window_size=self.window_size,
+                        delta=self.delta,
+                        gamma=self.gamma,
+                        top_k=top_k,
+                        voprf_server=self.voprf_server,
+                    )
+                ]
+            )
+            top_k = None  # reset top_k to None for the generation config
 
         generation_config = GenerationConfig(
             num_return_sequences=num_samples,
@@ -113,21 +130,6 @@ class WatermarkAdapter:
             top_p=top_p,
             suppress_tokens=suppress_tokens,
         )
-
-        # prepare for top-k adaptive sampling
-        logits_processor = None
-        if do_sample and top_k is not None:
-            logits_processor = LogitsProcessorList(
-                [
-                    TopkAdaptiveLogitsProcessor(
-                        window_size=self.window_size,
-                        delta=self.delta,
-                        gamma=self.gamma,
-                        top_k=top_k,
-                        voprf_server=self.voprf_server,
-                    )
-                ]
-            )
 
         output_ids = self.model.generate(
             **inputs,
@@ -156,12 +158,19 @@ class WatermarkAdapter:
 
     def _decode_generation(self, generated_ids: torch.LongTensor) -> str | list[str]:
         if generated_ids.dim() == 1:
-            return self.tokenizer.decode(generated_ids.tolist())
+            return self.tokenizer.decode(
+                generated_ids.tolist(), skip_special_tokens=True
+            )
         if generated_ids.dim() == 2:
-            return [self.tokenizer.decode(ids) for ids in generated_ids.tolist()]
+            return [
+                self.tokenizer.decode(ids, skip_special_tokens=True)
+                for ids in generated_ids.tolist()
+            ]
         if generated_ids.dim() == 3:
             return [
-                self.tokenizer.decode(generated_ids[i].tolist())
+                self.tokenizer.decode(
+                    generated_ids[i].tolist(), skip_special_tokens=True
+                )
                 for i in range(len(generated_ids))
             ]
         raise TypeError(

@@ -1,7 +1,7 @@
 """This script detects watermarks in generated texts without using FHE.
 It reads the watermarked text from a specified directory, derives the watermarking key,
 and checks each text for the presence of a watermark using the specified parameters.
-Pass '--check_ground_truth' to check the ground truth (unwatermarked) completions.
+Pass '--no_watermark' to check the unwatermarked completions.
 """
 
 import argparse
@@ -58,14 +58,9 @@ def get_args():
         "--top_k", type=int, default=None, help="Top-k sampling parameter"
     )
     parser.add_argument(
-        "--check_ground_truth",
-        action="store_true",
-        help="Whether to check the ground truth (unwatermarked) completions",
-    )
-    parser.add_argument(
         "--eval_model_path",
         type=str,
-        default="Qwen/Qwen2.5-3B",
+        default="Qwen/Qwen2.5-7B",
         help="Path to the pre-trained model directory for evaluation",
     )
     parser.add_argument(
@@ -73,14 +68,17 @@ def get_args():
         action="store_true",
         help="Whether to compute perplexity for the generated text",
     )
+    parser.add_argument(
+        "--no_watermark",
+        action="store_true",
+        help="Whether to check the unwatermarked text",
+    )
     return parser.parse_args()
 
 
 def get_input_file_name(args) -> str:
     model_name = args.tokenizer_path.split("/")[-1]
-    window_size = args.window_size
-    delta = args.delta
-    gamma = args.gamma
+
     do_sample = args.do_sample
     num_beams = args.num_beams
     sampling_method = ""
@@ -99,6 +97,13 @@ def get_input_file_name(args) -> str:
         raise ValueError(
             "Invalid sampling method: must be either greedy, beam, or multinomial"
         )
+
+    if args.no_watermark:
+        return f"{model_name}_{sampling_method}_no_watermark.jsonl"
+
+    window_size = args.window_size
+    delta = args.delta
+    gamma = args.gamma
 
     return f"{model_name}_{sampling_method}_w{window_size}_d{delta}_g{gamma}.jsonl"
 
@@ -197,7 +202,7 @@ def main(args):
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path)
 
-    target_column = "completion_text" if args.check_ground_truth else "generated_text"
+    target_column = "generated_text"
     detection_results = local_detect_batch_text(
         texts=[record[target_column] for record in generation_records],
         tokenizer=tokenizer,
@@ -215,13 +220,23 @@ def main(args):
         sum(r.total_token_num for r in detection_results) / example_num
     )
     avg_z_score = sum(r.z_score for r in detection_results) / example_num
-    check_object = "unwatermarked" if args.check_ground_truth else "watermarked"
+    check_object = "unwatermarked" if args.no_watermark else "watermarked"
     print(f"Watermark detection results for {input_file_name}:")
     print(f"Checking {check_object} completions")
     print(f"Detected: {detected_num} / {example_num}")
     print(f"Average green token number: {avg_green_token_num:.2f}")
     print(f"Average total token number: {avg_total_token_num:.2f}")
     print(f"Average z-score: {avg_z_score:.2f}")
+
+    for record, result in zip(generation_records, detection_results):
+        if result.p_value < significance_level:
+            print(
+                f"Example {record['index']} ({record['original_index']}): "
+                f"Not detected (p-value: {result.p_value:.4f}, z-score: {result.z_score:.2f})"
+            )
+            print(
+                f"- Green token number: {result.green_token_num} / {result.total_token_num}"
+            )
 
     if args.ppl:
         eval_model = AutoModelForCausalLM.from_pretrained(

@@ -32,6 +32,7 @@ for top_k in "${top_ks[@]}"; do
                     --num_beams 1 \
                     --top_k $top_k \
                     --temperature 0.7 \
+                    --suppress_eos \
                     2>&1 | tee "logs/generation/Qwen2.5-3B_multinomial-top${top_k}_w${window_size}_d${delta}_g${gamma}.log"
             done
         done

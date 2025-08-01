@@ -44,106 +44,6 @@ class TopkAdaptiveLogitsProcessor(LogitsProcessor):
         self.mini_batch_size = mini_batch_size or top_k
 
     @torch.no_grad()
-    def __bak_call__(
-        self, input_ids: torch.LongTensor, scores: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        if scores.dim() == 1:
-            input_ids = input_ids.unsqueeze(0)
-            scores = scores.unsqueeze(0)
-        elif scores.dim() != 2:
-            raise ValueError(f"Unsupported scores dimension: {scores.dim()}")
-
-        device = input_ids.device
-        batch_size, vocab_size = scores.shape
-        contexts = input_ids[:, -self.window_size :].tolist()
-        top_k_scores, _ = scores.topk(self.top_k)
-        cutoff_values = top_k_scores[:, -1] - self.delta
-
-        for i in range(batch_size):
-            context = contexts[i]
-            context_bytes = struct.pack(f"{len(context)}I", *context)
-
-            sub_scores = scores[i]
-            candidate_mask = sub_scores >= cutoff_values[i]
-            candidate_indices = torch.nonzero(candidate_mask).squeeze(-1)
-            candidate_size = candidate_indices.numel()
-
-            candidate_scores = sub_scores[candidate_indices]
-            sorted_candidates = sorted(
-                zip(candidate_scores.tolist(), candidate_indices.tolist()), reverse=True
-            )
-
-            num_calls = 0
-            top_k_heap = []
-
-            # mini-batch size set to self.top_k
-            mini_batch_size = self.top_k
-            for j in range(0, candidate_size, mini_batch_size):
-                size = min(mini_batch_size, candidate_size - j)
-                mini_batch = sorted_candidates[j : j + size]
-
-                msg_inputs = [
-                    context_bytes + struct.pack(">I", token_id)
-                    for _, token_id in mini_batch
-                ]
-                msg_hashes = self.voprf_server.batch_evaluate(msg_inputs)
-                probs = [
-                    int.from_bytes(msg_hash, "big") / (1 << 8 * len(msg_hash))
-                    for msg_hash in msg_hashes
-                ]
-                num_calls += len(msg_hashes)
-
-                for prob, (score, token_id) in zip(probs, mini_batch):
-                    if prob < self.gamma:
-                        new_score = score + self.delta
-                    else:
-                        new_score = score
-
-                    if len(top_k_heap) < self.top_k:
-                        heapq.heappush(top_k_heap, (new_score, token_id))
-                    else:
-                        heapq.heappushpop(top_k_heap, (new_score, token_id))
-
-                if j + size < candidate_size and len(top_k_heap) >= self.top_k:
-                    next_score, _ = sorted_candidates[j + size]
-                    kth_score = top_k_heap[0][0]
-                    if kth_score >= next_score + self.delta:
-                        break
-
-            # for j, (score, token_id) in enumerate(sorted_candidates):
-            #     msg_input = context_bytes + struct.pack(">I", token_id)
-            #     msg_hash = self.server.evaluate(msg_input)
-            #     prob = int.from_bytes(msg_hash, "big") / (1 << 8 * len(msg_hash))
-            #     num_calls += 1
-
-            #     if prob < self.p:
-            #         new_score = score + self.delta
-            #     else:
-            #         new_score = score
-
-            #     if len(top_k_heap) < self.top_k:
-            #         heapq.heappush(top_k_heap, (new_score, token_id))
-            #     else:
-            #         heapq.heappushpop(top_k_heap, (new_score, token_id))
-
-            #     if j + 1 < candidate_size and len(top_k_heap) >= self.top_k:
-            #         next_score, _ = sorted_candidates[j + 1]
-            #         kth_score = top_k_heap[0][0]
-            #         if kth_score >= next_score + self.delta:
-            #             break
-
-            if top_k_heap:
-                top_k_scores, top_k_indices = zip(*top_k_heap)
-                top_k_indices = torch.tensor(top_k_indices, device=device)
-                scores[i][top_k_indices] = torch.tensor(top_k_scores, device=device)
-
-            self.call_records.append(
-                VoprfCallRecord(vocab_size, candidate_size, num_calls)
-            )
-
-        return scores
-
-    @torch.no_grad()
     def __call__(
         self, input_ids: torch.LongTensor, scores: torch.FloatTensor
     ) -> torch.FloatTensor:
@@ -238,7 +138,7 @@ class TopkAdaptiveLogitsProcessor(LogitsProcessor):
 
             for i_idx, batch_idx in enumerate(active_indices_cpu):
                 context_bytes = context_bytes_list[batch_idx]
-                for k in range(self.mini_batch_size):
+                for k in range(size):
                     token_id = indices_cpu[i_idx, k]  # on device
                     if token_id != -1:
                         msg_inputs.append(
@@ -327,7 +227,7 @@ class TopkAdaptiveLogitsProcessor(LogitsProcessor):
 
         # Step 4. finalize scores
 
-        final_scores = scores.clone()
+        final_scores = torch.full_like(scores, -float("inf"))
 
         valid_final_mask = top_k_indices_batch != -1
         row_indices = (
@@ -444,10 +344,9 @@ class TestAdapter:
 
 def main():
     import time
-    from detection import detect
 
     seed = secrets.token_bytes(32)
-    model_path = "models/Qwen/Qwen2.5-3B"
+    model_path = "Qwen/Qwen2.5-3B"
     tokenizer = AutoTokenizer.from_pretrained(model_path, padding_side="left")
     model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16)
     model.eval()
@@ -466,14 +365,16 @@ def main():
     generated_token_num = 0
     for i, output in enumerate(outputs):
         generated_token_num += len(tokenizer.encode(output, add_special_tokens=False))
-        print(f"Sample {i + 1}: {output}")
+        # print(f"Sample {i + 1}: {output}")
     avg_tps = generated_token_num / generation_total_time
     print(f"Average Tokens Per Second: {avg_tps:.2f}")
 
     voprf_server = VoprfServer(seed)
-    green_count = 0
+    total_green_count = 0
     for output in outputs:
         tokens = tokenizer.encode(output, add_special_tokens=False)
+        token_num = len(tokens) - 7
+        green_num = 0
         for i in range(7, len(tokens)):
             context = tokens[i - 7 : i]
             token = tokens[i]
@@ -482,9 +383,11 @@ def main():
             msg_hash = voprf_server.evaluate(msg_input)
             sampling_prob = int.from_bytes(msg_hash, "big") / (1 << 8 * len(msg_hash))
             is_green = sampling_prob < 0.5
-            green_count += is_green
+            green_num += is_green
+        print(f"Green tokens: {green_num} / {token_num} ({green_num / token_num:.2%})")
+        total_green_count += green_num
     print(
-        f"Green tokens: {green_count} / {generated_token_num} ({green_count / generated_token_num:.2%})"
+        f"Green tokens: {total_green_count} / {generated_token_num} ({total_green_count / generated_token_num:.2%})"
     )
 
 

@@ -30,8 +30,8 @@ def _local_detect(
     voprf_server: VoprfServer,
 ) -> int:
     msg_inputs = [
-        struct.pack(f">{window_size + 1}I", *token_ids[i - window_size - 1 : i])
-        for i in range(window_size + 1, len(token_ids))
+        struct.pack(f">{window_size + 1}I", *token_ids[i - window_size: i + 1])
+        for i in range(window_size, len(token_ids))
     ]
     msg_hashes = voprf_server.batch_evaluate(msg_inputs)
     probs = [int.from_bytes(h, "big") / (1 << 8 * len(h)) for h in msg_hashes]

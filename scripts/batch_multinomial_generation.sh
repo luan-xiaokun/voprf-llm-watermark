@@ -24,10 +24,11 @@ for gamma in "${gammas[@]}"; do
                 --gamma $gamma \
                 --max_tokens 210 \
                 --server_seed data/server_seed \
-                --batch_size 64 \
+                --batch_size 128 \
                 --do_sample \
                 --num_beams 1 \
                 --temperature 0.7 \
+                --suppress_eos \
                 2>&1 | tee "logs/generation/Qwen2.5-3B_multinomial-w${window_size}_d${delta}_g${gamma}.log"
         done
     done

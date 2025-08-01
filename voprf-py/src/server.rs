@@ -19,10 +19,10 @@ impl Server {
         Ok(Self { voprf_server })
     }
 
-    pub fn derive_key(server_seed: &[u8; 32]) -> Result<Vec<u8>, voprf::Error> {
-        let key = derive_key::<CipherSuite>(server_seed, SERVER_INFO, voprf::Mode::Voprf)?;
-        Ok(key.as_bytes().to_vec())
-    }
+    // pub fn derive_key(server_seed: &[u8; 32]) -> Result<Vec<u8>, voprf::Error> {
+    //     let key = derive_key::<CipherSuite>(server_seed, SERVER_INFO, voprf::Mode::Voprf)?;
+    //     Ok(key.as_bytes().to_vec())
+    // }
 
     pub fn get_public_key(&self) -> RistrettoPoint {
         self.voprf_server.get_public_key()

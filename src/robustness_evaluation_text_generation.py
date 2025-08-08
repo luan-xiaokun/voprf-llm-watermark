@@ -1,4 +1,5 @@
 import argparse
+import sys
 from pathlib import Path
 
 import torch
@@ -10,8 +11,12 @@ from transformers.generation.logits_process import LogitsProcessorList
 from voprf_py import VoprfServer
 
 import utils
-from top_k_adaptive_sampling import TopkAdaptiveLogitsProcessor
 from detection import local_detect_batch_text
+from top_k_adaptive_sampling import TopkAdaptiveLogitsProcessor
+
+sys.path.append(str(Path(__file__).parent.parent))
+from kgw_watermark import WatermarkLogitsProcessor
+
 
 MODEL_PATH = "Qwen/Qwen2.5-3B-Instruct"
 OUTPUT_DIR = "output/robustness"
@@ -79,7 +84,39 @@ def get_args():
     parser.add_argument(
         "-n", "--num", type=int, default=1000, help="Number of examples to generate"
     )
+    parser.add_argument(
+        "--kgw_scheme",
+        type=str,
+        default="",
+        choices=["lefthash", "selfhash"],
+        help="KGW seeding scheme",
+    )
     return parser.parse_args()
+
+
+def generate_watermarked_texts(
+    batch,
+    token_num,
+    model,
+    tokenizer,
+    generation_config,
+    logits_processor,
+):
+    prompts = [format_prompt(q, token_num) for q in batch["question"]]
+
+    inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
+    outputs = model.generate(
+        **inputs,
+        tokenizer=tokenizer,
+        generation_config=generation_config,
+        logits_processor=logits_processor,
+    )
+
+    input_token_len = inputs.input_ids.shape[1]
+    generated_tokens = outputs[:, input_token_len:]
+
+    decoded_outputs = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+    return decoded_outputs
 
 
 def main():
@@ -102,6 +139,53 @@ def main():
     )
     model.eval()
 
+    generation_config = GenerationConfig(
+        do_sample=True,
+        max_new_tokens=MAX_NEW_TOKENS,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.eos_token_id,
+        stop_strings=STOP_STRINGS,
+        top_p=0.9,
+        temperature=0.7,
+    )
+
+    if args.kgw_scheme:
+        logits_processor = LogitsProcessorList(
+            [
+                WatermarkLogitsProcessor(
+                    vocab=list(tokenizer.get_vocab().values()),
+                    delta=2.0,
+                    gamma=0.25,
+                    seeding_scheme=args.kgw_scheme,
+                )
+            ]
+        )
+        p_bar = tqdm(
+            range(0, len(dataset), args.batch_size),
+            desc=f"Token num {token_num}, KGW scheme {args.kgw_scheme}",
+        )
+        for i in p_bar:
+            batch = dataset[i : i + args.batch_size]
+            decoded_outputs = generate_watermarked_texts(
+                batch, token_num, model, tokenizer, generation_config, logits_processor
+            )
+
+            results = []
+            for j, answer in enumerate(decoded_outputs):
+                results.append(
+                    {
+                        "question": batch["question"][j],
+                        "answer": batch["answer"][j],
+                        "kgw_generation": answer,
+                        "expected_token_num": token_num,
+                        "kgw_scheme": args.kgw_scheme,
+                    }
+                )
+
+            utils.write_jsonlines(output_file, results, mode="a")
+            p_bar.update(1)
+        return
+
     with open("data/server_seed") as seed_file:
         seed = bytes.fromhex(seed_file.read().strip())
     voprf_server = VoprfServer(seed)
@@ -109,15 +193,6 @@ def main():
     for token_num in TOKEN_NUMS:
         for window_size in [4, 7]:
             answers = []
-            generation_config = GenerationConfig(
-                do_sample=True,
-                max_new_tokens=token_num + 25,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id,
-                stop_strings=STOP_STRINGS,
-                top_p=0.9,
-                temperature=0.7,
-            )
             logits_processor = LogitsProcessorList(
                 [
                     TopkAdaptiveLogitsProcessor(
@@ -135,23 +210,14 @@ def main():
             )
             for i in p_bar:
                 batch = dataset[i : i + args.batch_size]
-                prompts = [format_prompt(q, token_num) for q in batch["question"]]
 
-                inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(
-                    model.device
-                )
-                outputs = model.generate(
-                    **inputs,
-                    tokenizer=tokenizer,
-                    generation_config=generation_config,
-                    logits_processor=logits_processor,
-                )
-
-                input_token_len = inputs.input_ids.shape[1]
-                generated_tokens = outputs[:, input_token_len:]
-
-                decoded_outputs = tokenizer.batch_decode(
-                    generated_tokens, skip_special_tokens=True
+                decoded_outputs = generate_watermarked_texts(
+                    batch,
+                    token_num,
+                    model,
+                    tokenizer,
+                    generation_config,
+                    logits_processor,
                 )
 
                 results = []
@@ -179,7 +245,7 @@ def main():
             )
             detected_num = sum(r.p_value < 1e-5 for r in detection_results)
             tpr = detected_num / len(detection_results)
-            print(f"TPR @1e-5 TPR: {tpr:.4f}")
+            print(f"TPR @1e-5 FPR: {tpr:.4f}")
 
 
 if __name__ == "__main__":

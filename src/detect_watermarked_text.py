@@ -14,9 +14,10 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DefaultDataCollator
 from transformers.modeling_utils import PreTrainedModel
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from sklearn.metrics import roc_auc_score
 
 import utils
-from detection import local_detect_batch_text, client_detect_batch_text
+from detection import local_detect_batch_text
 
 
 def get_args():
@@ -36,7 +37,7 @@ def get_args():
     parser.add_argument(
         "--significance_level",
         type=float,
-        default=0.01,
+        default=1e-5,
         help="Significance level for watermark detection",
     )
     parser.add_argument(
@@ -73,6 +74,16 @@ def get_args():
         action="store_true",
         help="Whether to check the unwatermarked text",
     )
+    parser.add_argument(
+        "--tpr_against_token_num",
+        action="store_true",
+        help="Whether to compute TPR against token number",
+    )
+    parser.add_argument(
+        "--auc_against_token_num",
+        action="store_true",
+        help="Whether to compute AUC against token number",
+    )
     return parser.parse_args()
 
 
@@ -106,6 +117,30 @@ def get_input_file_name(args) -> str:
     gamma = args.gamma
 
     return f"{model_name}_{sampling_method}_w{window_size}_d{delta}_g{gamma}.jsonl"
+
+
+def get_negative_samples(args):
+    model_name = args.tokenizer_path.split("/")[-1]
+
+    if args.num_beams == 1 and not args.do_sample:
+        sampling_method = "greedy"
+    elif args.num_beams > 1:
+        sampling_method = f"beam{args.num_beams}"
+    elif args.do_sample:
+        sampling_method = "multinomial"
+        if args.top_k is not None and args.top_k > 0:
+            sampling_method += f"-top{args.top_k}"
+    else:
+        raise ValueError(
+            "Invalid sampling method: must be either greedy, beam, or multinomial"
+        )
+    negative_sample_file = f"{model_name}_{sampling_method}_no_watermark.jsonl"
+    negative_sample_path = f"{args.input_dir}/{negative_sample_file}"
+    negative_samples = list(utils.read_jsonlines(negative_sample_path))
+    _, _, *negative_samples = negative_samples
+    texts = [sample["generated_text"] for sample in negative_samples]
+    print(f"Loaded {len(texts)} negative samples from {negative_sample_path}")
+    return texts
 
 
 def calculate_conditional_perplexity(
@@ -209,6 +244,7 @@ def main(args):
         window_size=window_size,
         gamma=args.gamma,
         seed=server_seed,
+        include_p_values_per_token=True,
     )
 
     example_num = len(detection_results)
@@ -216,27 +252,72 @@ def main(args):
     avg_green_token_num = (
         sum(r.green_token_num for r in detection_results) / example_num
     )
-    avg_total_token_num = (
-        sum(r.total_token_num for r in detection_results) / example_num
+    avg_effective_token_num = (
+        sum(r.effective_token_num for r in detection_results) / example_num
     )
-    avg_z_score = sum(r.z_score for r in detection_results) / example_num
+    avg_green_ratio = sum(r.green_ratio for r in detection_results) / example_num
     check_object = "unwatermarked" if args.no_watermark else "watermarked"
     print(f"Watermark detection results for {input_file_name}:")
     print(f"Checking {check_object} completions")
     print(f"Detected: {detected_num} / {example_num}")
     print(f"Average green token number: {avg_green_token_num:.2f}")
-    print(f"Average total token number: {avg_total_token_num:.2f}")
-    print(f"Average z-score: {avg_z_score:.2f}")
+    print(f"Average effective token number: {avg_effective_token_num:.2f}")
+    print(f"Average green ratio: {avg_green_ratio * 100:.2f}%")
 
-    for record, result in zip(generation_records, detection_results):
-        if result.p_value < significance_level:
-            print(
-                f"Example {record['index']} ({record['original_index']}): "
-                f"Not detected (p-value: {result.p_value:.4f}, z-score: {result.z_score:.2f})"
-            )
-            print(
-                f"- Green token number: {result.green_token_num} / {result.total_token_num}"
-            )
+    # TPR against token number
+    if args.tpr_against_token_num:
+        max_length = max(len(r.p_values_per_token) for r in detection_results)
+        print("Max length:", max_length, "window size:", window_size)
+        tpr_list = [0.0] * window_size
+        for i in range(max_length):
+            p_values_at_i = []
+            for r in detection_results:
+                if i < len(r.p_values_per_token):
+                    p_values_at_i.append(r.p_values_per_token[i])
+            detected_num = sum(p < significance_level for p in p_values_at_i)
+            tpr = detected_num / len(p_values_at_i) if p_values_at_i else 0.0
+            tpr_list.append(tpr)
+            token_num = window_size + i + 1
+            if token_num % 10 == 0:
+                print(f"TPR at token {token_num}: {tpr * 100:.2f}%")
+
+    # AUC against token number
+    if args.auc_against_token_num:
+        negative_samples = get_negative_samples(args)
+        detection_results_negative = local_detect_batch_text(
+            texts=negative_samples,
+            tokenizer=tokenizer,
+            window_size=window_size,
+            gamma=args.gamma,
+            seed=server_seed,
+            include_p_values_per_token=True,
+        )
+        labels = [0] * len(detection_results) + [1] * len(negative_samples)
+        detection_results.extend(detection_results_negative)
+        max_length = max(len(r.p_values_per_token) for r in detection_results)
+        print("Max length:", max_length, "window size:", window_size)
+        auc_list = [0.0] * window_size
+        for i in range(max_length):
+            p_values_at_i = []
+            sub_labels = []
+            for j, r in enumerate(detection_results):
+                if i < len(r.p_values_per_token):
+                    p_values_at_i.append(r.p_values_per_token[i])
+                    sub_labels.append(labels[j])
+            auc = roc_auc_score(sub_labels, p_values_at_i)
+            auc_list.append(auc)
+            token_num = window_size + i + 1
+            if token_num % 10 == 0:
+                print(f"AUC at token {token_num}: {auc:.6f}")
+
+    # for record, result in zip(generation_records, detection_results):
+    #     if result.p_value >= significance_level:
+    #         print(
+    #             f"Example {record['index']} not detected "
+    #             f"(p-value: {result.p_value:.4f}, "
+    #             f"effective tokens: {result.effective_token_num}, "
+    #             f"green ratio: {result.green_ratio * 100:.2f}%)"
+    #         )
 
     if args.ppl:
         eval_model = AutoModelForCausalLM.from_pretrained(
@@ -252,6 +333,10 @@ def main(args):
             target_column=target_column,
         )
         print(f"Average perplexity: {ppl:.2f}")
+
+
+def tpr_against_token_num(args):
+    pass
 
 
 if __name__ == "__main__":

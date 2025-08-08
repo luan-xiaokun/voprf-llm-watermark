@@ -8,6 +8,7 @@ dependencies = [
     "accelerate>=1.9.0",
     "cryptography>=45.0.5",
     "datasets>=4.0.0",
+    "scikit-learn>=1.7.1",
     "scipy>=1.16.1",
     "torch>=2.7.1",
     "transformers>=4.53.3",
@@ -28,6 +29,12 @@ explicit = true
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[dependency-groups]
+dev = [
+    "human-eval>=1.0.3",
+    "matplotlib>=3.10.5",
+]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"

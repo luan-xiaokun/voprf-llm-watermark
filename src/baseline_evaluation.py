@@ -1,21 +1,28 @@
 import argparse
-import secrets
-import time
+import sys
 from pathlib import Path
+import time
 
 import torch
 import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.generation.configuration_utils import GenerationConfig
+from transformers.generation.logits_process import LogitsProcessorList
+from scipy import stats
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import utils
-from watermark import WatermarkAdapter
+from kgw_watermark import WatermarkDetector, WatermarkLogitsProcessor
 
 DATA_FILE_PATH = "data/c4_realnewslike_subset_673.jsonl"
 
 
 def get_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate watermarked texts.")
+    parser = argparse.ArgumentParser(
+        description="Generate watermarked text using KGW baseline method"
+    )
     parser.add_argument(
         "-n",
         "--num",
@@ -32,11 +39,14 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./output",
+        default="./output/kgw_baseline",
         help="Directory to save the generated watermarked text",
     )
     parser.add_argument(
-        "--window_size", type=int, default=7, help="Window size for watermarking"
+        "--significance_level",
+        type=float,
+        default=1e-6,
+        help="Significance level for watermark detection",
     )
     parser.add_argument(
         "--delta", type=float, default=2.0, help="Delta value for watermarking"
@@ -45,16 +55,17 @@ def get_args() -> argparse.Namespace:
         "--gamma", type=float, default=0.25, help="Gamma value for watermarking"
     )
     parser.add_argument(
+        "--seeding_scheme",
+        type=str,
+        default="selfhash",
+        choices=["selfhash", "lefthash", "minhash", "skipgram"],
+        help="Seeding scheme for watermarking",
+    )
+    parser.add_argument(
         "--max_tokens",
         type=int,
         default=210,
         help="Maximum number of tokens to generate in response to a prompt",
-    )
-    parser.add_argument(
-        "--server_seed",
-        type=str,
-        default=None,
-        help="File path to the server seed for watermarking",
     )
     parser.add_argument(
         "--batch_size", type=int, default=1, help="Batch size for generation"
@@ -84,11 +95,6 @@ def get_args() -> argparse.Namespace:
         action="store_true",
         help="If set, will overwrite existing output files",
     )
-    parser.add_argument(
-        "--no_watermark",
-        action="store_true",
-        help="If set, will not apply watermarking to the generated text",
-    )
     return parser.parse_args()
 
 
@@ -114,18 +120,14 @@ def get_output_file_name(args) -> str:
             "Invalid sampling method: must be either greedy, beam, or multinomial"
         )
 
-    if args.no_watermark:
-        return f"{model_name}_{sampling_method}_no_watermark.jsonl"
-
-    window_size = args.window_size
     delta = args.delta
     gamma = args.gamma
+    hash_scheme = args.seeding_scheme
 
-    return f"{model_name}_{sampling_method}_w{window_size}_d{delta}_g{gamma}.jsonl"
+    return f"kgw_{hash_scheme}_{model_name}_{sampling_method}_d{delta}_g{gamma}.jsonl"
 
 
-def main(args):
-    # prepare output file
+def generate(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file_name = get_output_file_name(args)
@@ -143,14 +145,12 @@ def main(args):
             print("Exiting without overwriting the file.")
             return
 
-    # print and save generation arguments
     print(f"Output will be saved to {output_file_path}")
     print("Generation arguments:")
     for key, value in vars(args).items():
         print(f"- {key}: {value}")
     utils.write_jsonlines(output_file_path, vars(args))
 
-    # load model, tokenizer, and dataset
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForCausalLM.from_pretrained(
         args.model_path, torch_dtype=torch.bfloat16
@@ -163,67 +163,74 @@ def main(args):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     dataset = load_dataset("json", data_files=DATA_FILE_PATH, split="train")
-    dataset = dataset.select(range(args.num))  # limit to the first `num` examples
+    dataset = dataset.select(range(args.num))
 
-    # set up watermark adapter and save the server seed
-    if not args.server_seed:
-        print("Generating a new server seed for watermarking")
-        server_seed = secrets.token_bytes(32)
-    elif args.server_seed:
-        print(f"Loading server seed from {args.server_seed}")
-        with open(args.server_seed, "r", encoding="utf-8") as f:
-            server_seed = bytes.fromhex(f.read().strip())
-    adapter = WatermarkAdapter(
-        model=model,
-        tokenizer=tokenizer,
-        window_size=args.window_size,
+    logits_processor = WatermarkLogitsProcessor(
+        vocab=list(tokenizer.get_vocab().values()),
         delta=args.delta,
         gamma=args.gamma,
-        seed=server_seed,
-    )
-    utils.write_jsonlines(
-        output_file_path, {"server_seed": server_seed.hex()}, mode="a"
+        seeding_scheme=args.seeding_scheme,
     )
 
-    print("Warming up...")
-    warmup_prompts = ["Just a test to warm up the GPU."]
-    _ = adapter(
-        prompts=warmup_prompts,
-        max_new_tokens=8,
-        pad_token_id=tokenizer.eos_token_id,
-        no_watermark=args.no_watermark,
+    z_threshold = stats.norm.ppf(1 - args.significance_level)
+    watermark_detector = WatermarkDetector(
+        vocab=list(tokenizer.get_vocab().values()),
+        gamma=args.gamma,
+        seeding_scheme=args.seeding_scheme,
+        device=model.device,
+        tokenizer=tokenizer,
+        z_threshold=z_threshold,
+        normalizers=[],
+        ignore_repeated_ngrams=True,
     )
-    torch.cuda.synchronize()
-    print("Warm-up finished.")
 
-    # iterate over the dataset and generate watermarked text
+    all_generated_texts = []
     generation_total_time = 0.0
     generated_total_tokens = 0
-    starter, ender = (
-        torch.cuda.Event(enable_timing=True),
-        torch.cuda.Event(enable_timing=True),
-    )
-
     for batch in (pbar := tqdm.tqdm(dataset.batch(args.batch_size))):
         prompts = batch["prompt_text"]
         with torch.no_grad():
-            starter.record()
-            generated_texts = adapter(
-                prompts=prompts,
+            generation_start_time = time.perf_counter()
+
+            batch_encoding = tokenizer(prompts, return_tensors="pt", padding=True)
+            input_ids: torch.LongTensor = batch_encoding["input_ids"]
+            attention_mask: torch.LongTensor = batch_encoding["attention_mask"]
+            inputs = {
+                "input_ids": input_ids.to(model.device),
+                "attention_mask": attention_mask.to(model.device),
+            }
+            generation_config = GenerationConfig(
                 max_new_tokens=args.max_tokens,
                 do_sample=args.do_sample,
                 num_beams=args.num_beams,
-                top_p=args.top_p,
-                top_k=args.top_k,
                 temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
                 suppress_tokens=[tokenizer.eos_token_id] if args.suppress_eos else None,
-                pad_token_id=tokenizer.eos_token_id,
-                no_watermark=args.no_watermark,
+                pad_token_id=tokenizer.pad_token_id,
             )
-            ender.record()
-            torch.cuda.synchronize()
-            curr_time = starter.elapsed_time(ender) / 1000.0
-            generation_total_time += curr_time
+
+            output_ids = model.generate(
+                **inputs,
+                generation_config=generation_config,
+                tokenizer=tokenizer,
+                logits_processor=LogitsProcessorList([logits_processor]),
+            )
+            # for decoder-only models, we need to slice the output_ids
+            generated_ids = output_ids[:, input_ids.shape[1] :]
+            generated_texts = [
+                tokenizer.decode(ids, skip_special_tokens=True)
+                for ids in generated_ids.tolist()
+            ]
+
+            generation_total_time += time.perf_counter() - generation_start_time
+
+        detection_results = [
+            watermark_detector.detect(text) for text in generated_texts
+        ]
+        # {'num_tokens_scored': 206, 'num_green_tokens': 114, 'green_fraction': 0.5533980582524272
+        # 'z_score': 10.05647483386412, 'p_value': np.float64(4.301179336252213e-24), 'z_score_at_T': tensor
+        # 'prediction': np.True_, 'confidence'
 
         generation_results = [
             {
@@ -232,16 +239,28 @@ def main(args):
                 "prompt_text": prompt,
                 "completion_text": completion,
                 "generated_text": gen_text,
+                "total_token_num": det_res["num_tokens_scored"],
+                "green_token_num": det_res["num_green_tokens"],
+                "green_fraction": det_res["green_fraction"],
+                "z_score": det_res["z_score"],
+                "p_value": float(det_res["p_value"]),
+                "prediction": bool(det_res["prediction"]),
+                "confidence": float(det_res.get("confidence", 0.0)),
+                "z_score_at_T": det_res.get(
+                    "z_score_at_T", torch.tensor([0.0])
+                ).tolist(),
             }
-            for idx, orig_idx, prompt, completion, gen_text in zip(
+            for idx, orig_idx, prompt, completion, gen_text, det_res in zip(
                 batch["index"],
                 batch["original_index"],
                 batch["prompt_text"],
                 batch["completion_text"],
                 generated_texts,
+                detection_results,
             )
         ]
         utils.write_jsonlines(output_file_path, generation_results, mode="a")
+        all_generated_texts.extend(generated_texts)
 
         generated_total_tokens += sum(
             len(tokenizer.encode(text, add_special_tokens=False))
@@ -258,4 +277,4 @@ def main(args):
 
 if __name__ == "__main__":
     args = get_args()
-    main(args)
+    generate(args)

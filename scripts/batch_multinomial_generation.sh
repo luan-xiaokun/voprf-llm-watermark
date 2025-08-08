@@ -3,11 +3,7 @@ source .venv/bin/activate
 
 mkdir -p logs/generation
 
-# window_sizes=(4 5 6 7 8 9)
-# deltas=(0.5 1.0 2.0 3.0 4.0 5.0)
-# gammas=(0.25 0.5 0.75)
-
-window_sizes=(5 6 7 8)
+window_sizes=(4 5 6 7 8)
 deltas=(1.0 2.0 3.0 4.0)
 gammas=(0.25 0.5 0.75)
 

@@ -1,118 +1,101 @@
-# Verifiable and Privacy Enhanced LLM Watermark
+# VOW: Verifiable and Oblivious Watermark Detection for Large Language Models
 
-This project implements a privacy-enhanced LLM watermarking scheme that is verifiable under a malicious security model.
-The proposed watermarking scheme is based on the KGW watermarking scheme, which partitions the vocabulary into green and red tokens and encourages the model to generate green tokens.
-Compared with the KWG watermarking scheme, this new approach allows the client to detect watermarks in text without revealing the content of the text to the service provider.
-Meanwhile, the detection results returned by the server come with a proof that can be verified by the client.
+This repository contains the source code for the VOW watermarking scheme, a protocol that achieves cryptographic verifiability and privacy-preserving LLM watermarking.
+Scripts and raw data for reproducing the main results in the paper are also included.
 
-## Project Features
+The proposed scheme, VOW, allows the user to detect watermarks in text without revealing the content of the text to the service provider, thus protecting the user's privacy.
+Meanwhile, the detection results returned by the provider come with a proof that can be verified by the user, ensuring the integrity of the watermark detection results.
 
-- Blazingly fast watermark generation with Rust implementation for vocabulary partitioning
-- Compatible with any HuggingFace Transformers model
-- Adjustable watermark strength parameters
-- Multiple sampling strategy support
-- Batch text generation support
+## Organization
+
+The repository is organized as follows:
+
+- `src/watermark_suite`: Contains the implementation of VOW and baseline methods used for evaluation.
+- `voprf-py`: Provides a Python interface for the VOPRF-based watermark scheme, used by our scheme VOW.
+- `experiments`: Contains scripts for generating and detecting watermarked texts, benchmarking watermarking methods, and attacking watermarked texts.
+- `data`: Contains the sampled subset of the C4 dataset used for our evaluation, as well as raw data to plot figures.
+- `analysis`: Contains scripts for analysis and visualization of the results.
+- `scripts`: Contains a script to download the models and datasets required to reproduce the evaluation results.
+
 
 ## Requirements
 
 - Python >= 3.13
 - PyTorch >= 2.7.1
 - Transformers >= 4.53.3
+- see `pyproject.toml`
 
 We recommend using [uv](https://docs.astral.sh/uv/) to manage the virtual environment and dependencies for this project. To set up the environment, run:
 
 ```bash
 uv sync
 cd voprf-py && maturin develop && cd ..
+uv pip install -e .
 ```
+
+After setting up the environment, `watermark_suite` is installed as a Python package.
+
 
 ## Quick Start
 
 ```python
 import secrets
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from watermark import WatermarkAdapter
-from detection import client_detect_batch_text
-
-# Initialize model and tokenizer
-model = AutoModelForCausalLM.from_pretrained("your-model-path")
-tokenizer = AutoTokenizer.from_pretrained("your-model-path")
-
-# Generate a watermark seed
-seed = secrets.token_bytes(32)
-
-# Initialize watermark adapter and detector
-adapter = WatermarkAdapter(
-    model=model,
-    tokenizer=tokenizer,
-    window_size=2,  # Window size for green token generation
-    delta=2.0       # Watermark strength
-    gamma=0.25      # Green token ratio
-    seed=seed,
-)
+from watermark_suite.schemes import VOWAdapter, VOWDetector
 
 # Generate watermarked text
-watermarked_text = adapter(
-    prompts="Tell me a story about a brave knight.",
-    max_tokens=200,
-    temperature=0.7
+model = AutoModelForCausalLM.from_pretrained("your-model-path")
+model.to("cuda" if torch.cuda.is_available() else "cpu")
+model.eval()
+tokenizer = AutoTokenizer.from_pretrained("your-model-path")
+
+seed = secrets.token_bytes(32)
+adapter = VOWAdapter(
+    model, tokenizer, window_size=4, delta=2.5, gamma=0.5, seed=seed
 )
+
+prompt = "How many woodchucks would chuck if a woodchuck could chuck wood?"
+generated_text = adapter(prompt)  # or a list of str
+print(f"Generated: {generated_text}")
 
 # Detect watermark
-server_public_key = adapter.get_public_key()
+# 1. the user creates a detector
+detector = VOWDetector(tokenizer, window_size=4, gamma=0.5, seed=seed)
+# 2. the user gets public key and server interface from the service provider
+public_key = adapter.get_public_key()
 server_interface = adapter.get_server_interface()
-result = client_detect_batch_text(
-    [watermarked_text],
-    tokenizer,
-    window_size=2,
-    gamma=0.25,
-    server_public_key=server_public_key,
-    server_interface=server_interface,
-)
+# 3. the user checks watermark
+detection_result = detector.detect(generated_text, public_key, server_interface)
+# the service provider cannot learn the content of the text
+print(detection_result)
 ```
-
-## About VOPRF and voprf-py
-
-We use the `voprf` crate to implement the VOPRF-based watermark scheme.
-To build it, run the following command in the `voprf-py` directory after initializing the virtual environment using `uv`:
-
-```bash
-uv tool install maturin
-maturin develop
-```
-
-After this, the local `voprf-py` module should be installed into the virtual environment and ready to use.
 
 
 ## Instructions
 
-### Dataset
+### Data
 
 We select 500 samples from a subset of C4, `realnewslike`, to construct the dataset for our evaluation experiments.
-These samples are chosen randomly with the following requirements:
-- The first 60 tokens are used as the prompts;
-- For the rest of the text, it is used as the ground truth completion, we require that its length must be over 200 tokens.
-
-The constructed dataset contains 673 samples.
-All the preprocessing steps are implemented in the `prepare_dataset.py` script, resulting in a jsonl file under the `data` folder.
+These samples are saved to a jsonl file under the `data` folder.
 
 Additionally, we stick to one master key (seed) for watermarking purpose to ensure the comparison between different settings is fair.
-This master key is also saved under `data` folder. It is generated by using `secret.token_bytes(32)` in Python to ensure its security.
+This master key is also saved under `data` folder.
+
+Other dataset required for replicating the experiments can be downloaded by running the `scripts/download_models_and_datasets.sh` script.
 
 ### Generation script
 
-The script `generate_watermarked_text.py` reads configuration from the command line options, and use the default model, Qwen2.5-3B, to generate watermarked texts. Detailed usage can be found by passing `--help` flag to it.
+The script `experiments/run_generation.py` reads configuration from the command line options, and use the default model, Qwen2.5-3B, to generate watermarked texts. Detailed usage can be found by passing `--help` flag to it.
 
-By default, the generation configuration and the used master key will be saved along with the generated texts (watermarked) in a single jsonl file under the `output` directory.
-When saving the generated texts, we also save the prompt and the ground truth completion from the c4 dataset.
+By default, the generation configuration and the used master key will be saved along with the generated texts (watermarked) in a single jsonl file under the `output/generation` directory.
+When saving the generated texts, we also save the prompt and the configuration.
 
 Pass `--num N` to the command line to set the number of samples to generate.
 By default, we generate 500 samples for evaluation purpose.
 
 ### Detection script
 
-The script `detect_watermark_text.py` reads the configuration to load the corresponding output file generated by the generation script. For development purpose, the evaluation model for perplexity calculation is also set to Qwen2.5-3B. **PLEASE USE A LARGER MODEL FOR PPL CALCULATION.** (e.g., Qwen2.5-7B, which can be downloaded along with Qwen2.5-3B using the script `download_models.sh`)
+The script `experiments/run_detection.py` reads the configuration to load the corresponding output file generated by the generation script.
 
 By default, the detection script checks the watermarks in the generated texts, and outputs the overall results.
-It can also check the ground truth completions' watermarks by passing a flag `--check_ground_truth`.
-When the flag `--ppl` is passed, the script will additionally evaluate the perplexity of the texts (generated or ground truth).
+When the flag `--ppl` is passed, the script will additionally evaluate the perplexity of the texts, using a default evaluation model Qwen2.5-7B.

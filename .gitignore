@@ -227,6 +227,8 @@ Cargo.lock
 
 # Custom rules (everything added below won't be overriden by 'Generate .gitignore File' if you use 'Update' option)
 data/
+legacy/
 logs/
 models/
 output/
+src/watermark_suite/schemes/rdf/*.c

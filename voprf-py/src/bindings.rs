@@ -14,7 +14,7 @@ type CipherSuite = Ristretto255;
 #[pyclass]
 #[pyo3(name = "BlindedElement")]
 #[derive(Clone)]
-struct PyBlindedElement {
+pub struct PyBlindedElement {
     pub message: BlindedElement<CipherSuite>,
 }
 
@@ -39,7 +39,7 @@ impl PyBlindedElement {
 #[pyclass]
 #[pyo3(name = "EvaluationElement")]
 #[derive(Clone)]
-struct PyEvaluationElement {
+pub struct PyEvaluationElement {
     pub message: EvaluationElement<CipherSuite>,
 }
 
@@ -64,7 +64,7 @@ impl PyEvaluationElement {
 #[pyclass]
 #[pyo3(name = "Proof")]
 #[derive(Clone)]
-struct PyProof {
+pub struct PyProof {
     pub proof: Proof<CipherSuite>,
 }
 
@@ -89,7 +89,7 @@ impl PyProof {
 #[pyclass]
 #[pyo3(name = "PublicKey")]
 #[derive(Clone)]
-struct PyPublicKey {
+pub struct PyPublicKey {
     pub key: RistrettoPoint,
 }
 
@@ -113,7 +113,7 @@ impl PyPublicKey {
 #[pyclass]
 #[pyo3(name = "VoprfClient")]
 #[derive(Clone)]
-struct PyVoprfClient {
+pub struct PyVoprfClient {
     pub state: VoprfClient<CipherSuite>,
 }
 
@@ -138,7 +138,7 @@ impl PyVoprfClient {
 #[pyclass]
 #[pyo3(name = "VoprfServer")]
 #[derive(Clone)]
-struct PyVoprfServer {
+pub struct PyVoprfServer {
     pub server: VoprfServer<CipherSuite>,
 }
 
@@ -232,7 +232,7 @@ impl PyVoprfServer {
 }
 
 #[pyfunction]
-fn prepare_batch_blind_inputs(
+pub fn prepare_batch_blind_inputs(
     inputs: Vec<Vec<u8>>,
 ) -> PyResult<(Vec<PyVoprfClient>, Vec<PyBlindedElement>)> {
     let mut rng = rand::thread_rng();
@@ -262,7 +262,7 @@ fn prepare_batch_blind_inputs(
 }
 
 #[pyfunction]
-fn finalize_batch_blind_results(
+pub fn finalize_batch_blind_results(
     inputs: Vec<Vec<u8>>,
     states: Vec<PyVoprfClient>,
     messages: Vec<PyEvaluationElement>,
@@ -298,20 +298,4 @@ fn finalize_batch_blind_results(
         }
     };
     Ok(res)
-}
-
-#[pymodule]
-#[pyo3(name = "_voprf_py")]
-fn voprf_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyBlindedElement>()?;
-    m.add_class::<PyEvaluationElement>()?;
-    m.add_class::<PyProof>()?;
-    m.add_class::<PyPublicKey>()?;
-    m.add_class::<PyVoprfClient>()?;
-    m.add_class::<PyVoprfServer>()?;
-
-    m.add_function(wrap_pyfunction!(prepare_batch_blind_inputs, m)?)?;
-    m.add_function(wrap_pyfunction!(finalize_batch_blind_results, m)?)?;
-
-    Ok(())
 }

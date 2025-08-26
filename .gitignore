@@ -226,9 +226,14 @@ Cargo.lock
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,linux,python,rust
 
 # Custom rules (everything added below won't be overriden by 'Generate .gitignore File' if you use 'Update' option)
-data/
+data/*
 legacy/
 logs/
 models/
 output/
 src/watermark_suite/schemes/rdf/*.c
+
+!/data/c4_realnewslike_subset_673.jsonl
+!/data/pdw
+!/data/plot_data/
+!/data/server_seed

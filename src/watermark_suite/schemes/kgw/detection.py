@@ -1,4 +1,6 @@
 # coding=utf-8
+# Code in this file is adapted from:
+#
 # Copyright 2023 Authors of "A Watermark for Large Language Models"
 # available at https://arxiv.org/abs/2301.10226
 #

@@ -1,3 +1,8 @@
+# Code in this file is adapted from:
+#
+# Publicly-Detectable Watermarking for Language Models
+# https://github.com/jfairoze/publicly-detectable-watermark
+
 import hashlib
 from struct import unpack
 from typing import Any

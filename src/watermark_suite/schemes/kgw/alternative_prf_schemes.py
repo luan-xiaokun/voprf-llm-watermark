@@ -1,10 +1,6 @@
-"""Implement other PRF functions (These all vary only how they generate a single hash from the tokens in the context).
-
-Can be hooked into existing WatermarkLogitsProcessor as modified base class WatermarkBase, see implementation in
-extended_watermark_processor.py
-"""
-
 # coding=utf-8
+# Code in this file is adapted from:
+#
 # Copyright 2023 Authors of "A Watermark for Large Language Models"
 # available at https://arxiv.org/abs/2301.10226
 #
@@ -19,6 +15,12 @@ extended_watermark_processor.py
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+"""Implement other PRF functions (These all vary only how they generate a single hash from the tokens in the context).
+
+Can be hooked into existing WatermarkLogitsProcessor as modified base class WatermarkBase, see implementation in
+extended_watermark_processor.py
+"""
 
 from functools import cache
 from itertools import combinations

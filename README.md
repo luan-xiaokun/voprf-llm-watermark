@@ -40,6 +40,7 @@ After setting up the environment, `watermark_suite` is installed as a Python pac
 
 ```python
 import secrets
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from watermark_suite.schemes import VOWAdapter, VOWDetector
 

@@ -39,6 +39,7 @@ class VOWDetectionResult(DetectionResult):
     effective_token_num: int
     green_ratio: float
     p_values_per_token: list[float] | None
+    green_token_mask: list[bool] | None
 
 
 @dataclass
@@ -73,13 +74,15 @@ class VOWDetector(WatermarkDetector):
         gamma: float | None = None,
         window_size: int | None = None,
         include_p_values_per_token: bool = False,
+        return_green_token_mask: bool = False,
         token_num: int | None = None,
     ) -> VOWDetectionResult:
-        return self.batch_detect(
+        return self.local_batch_detect(
             [text],
             gamma=gamma,
             window_size=window_size,
             include_p_values_per_token=include_p_values_per_token,
+            return_green_token_mask=return_green_token_mask,
             token_num=token_num,
         )[0]
 
@@ -89,6 +92,7 @@ class VOWDetector(WatermarkDetector):
         gamma: float | None = None,
         window_size: int | None = None,
         include_p_values_per_token: bool = False,
+        return_green_token_mask: bool = False,
         token_num: int | None = None,
     ) -> list[VOWDetectionResult]:
         gamma = gamma or self.gamma
@@ -170,6 +174,14 @@ class VOWDetector(WatermarkDetector):
                     p_values.append(p_value)
                 p_value = p_values[-1] if p_values else 1.0
 
+            green_token_mask = None
+            if return_green_token_mask:
+                green_token_mask = [False] * window_size
+                for j in range(window_size, len(token_ids_list[i])):
+                    n_gram = tuple(token_ids_list[i][j - window_size : j + 1])
+                    color = gram_to_color_map[n_gram]
+                    green_token_mask.append(color)
+
             if effective_token_num > 0:
                 green_ratio = green_token_num / effective_token_num
             else:
@@ -181,6 +193,7 @@ class VOWDetector(WatermarkDetector):
                 green_ratio=green_ratio,
                 p_value=p_value,
                 p_values_per_token=p_values,
+                green_token_mask=green_token_mask,
             )
             results.append(detect_result)
 
@@ -308,6 +321,7 @@ class VOWDetector(WatermarkDetector):
                 green_ratio=green_ratio,
                 p_value=p_value,
                 p_values_per_token=None,
+                green_token_mask=None,
             )
             detect_cost = VOWDetectionCost(
                 raw_string_bytes=len(text.encode("utf-8")),

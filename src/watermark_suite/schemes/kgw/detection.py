@@ -462,6 +462,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         window_stride: int = None,
         return_prediction: bool = True,
         return_scores: bool = True,
+        return_green_token_mask: bool = False,
         z_threshold: float = None,
         convert_to_float: bool = False,
         return_z_at_T: bool = False,
@@ -515,12 +516,16 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
                 window_size=window_size,
                 window_stride=window_stride,
                 return_z_at_T=return_z_at_T,
+                return_green_token_mask=return_green_token_mask,
                 **kwargs,
             )
             output_dict.update(score_dict)
         else:
             score_dict = self._score_sequence(
-                tokenized_text, return_z_at_T=return_z_at_T, **kwargs
+                tokenized_text,
+                return_z_at_T=return_z_at_T,
+                return_green_token_mask=return_green_token_mask,
+                **kwargs,
             )
         if return_scores:
             output_dict.update(score_dict)

@@ -11,6 +11,7 @@ from watermark_suite.schemes import (
     VOWAdapter,
     WatermarkAdapter,
 )
+from watermark_suite.schemes.upv import UPVAdapter
 from watermark_suite.schemes.vow.key import get_server_seed
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-3B"
@@ -23,7 +24,7 @@ def parse_args():
         "method",
         nargs="?",
         type=str,
-        choices=["lefthash", "selfhash", "rdf", "vow", "pdw"],
+        choices=["lefthash", "selfhash", "rdf", "vow", "pdw", "upv"],
         help="Watermarking method",
     )
     parser.add_argument(
@@ -144,6 +145,17 @@ def main():
             tokenizer=tokenizer,
             timing=True,
         )
+    elif args.method == "upv":
+        adapter = UPVAdapter(
+            model,
+            tokenizer,
+            "experiments/upv_baseline/model",
+            window_size=4,
+            delta=2.0,
+            bit_number=18,
+            layers=5,
+            beam_size=0,
+        )
     else:
         raise ValueError(f"Unknown watermarking method: {args.method}")
 
@@ -159,16 +171,16 @@ def main():
     adapter.to(device)
     adapter.eval()
 
-    if args.method != "pdw":
-        print(f"Warming up...")
-        warmup_prompt = ["Just a test to warm up the GPU"]
-        _ = adapter(
-            prompts=warmup_prompt,
-            max_new_tokens=8,
-            pad_token_id=adapter.tokenizer.eos_token_id,
-        )
-        torch.cuda.synchronize()
-        print("Warm-up finished")
+    # if args.method != "pdw":
+    #     print(f"Warming up...")
+    #     warmup_prompt = ["Just a test to warm up the GPU"]
+    #     _ = adapter(
+    #         prompts=warmup_prompt,
+    #         max_new_tokens=2,
+    #         pad_token_id=adapter.tokenizer.eos_token_id,
+    #     )
+    #     torch.cuda.synchronize()
+    #     print("Warm-up finished")
 
     adapter.timing = True
 

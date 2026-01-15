@@ -14,6 +14,7 @@ from watermark_suite.schemes import (
     VOWAdapter,
     WatermarkAdapter,
 )
+from watermark_suite.schemes.upv import UPVAdapter
 from watermark_suite.schemes.vow.key import get_server_seed
 from watermark_suite.utils import io_utils
 
@@ -30,14 +31,14 @@ METHOD_PARAMS_DICT = {
     "rdf": ["length", "seed", "watermark_device"],
 }
 DATASET_PATH_DICT = {
-    "c4": "data/c4_realnewslike_subset_673.jsonl",
+    "c4": "data/c4_realnewslike_subset_1000.jsonl",
     "eli5": "data/eli5",
 }
-ELI5_PROMPT_TEMPLATE = (
-    "Explain the following question like I'm 5 years old. "
+ELI5_SYSTEM_MESSAGE = (
+    "Explain the following question in about 500 words like I'm 5 years old. "
     "Use very simple language, short sentences, and analogies a child can understand."
-    "\n\nQuestion: {question}"
 )
+ELI5_PROMPT_TEMPLATE = f"{ELI5_SYSTEM_MESSAGE}\n\nQuestion: {{question}}"
 INSTRUCT_STOP_STRINGS = [
     "USER:",
     "ASSISTANT:",
@@ -69,7 +70,7 @@ def parse_args():
         "method",
         nargs="?",
         type=str,
-        choices=["lefthash", "selfhash", "rdf", "vow", "pdw"],
+        choices=["lefthash", "selfhash", "rdf", "vow", "pdw", "upv"],
         help="Watermarking method",
     )
     parser.add_argument(
@@ -96,7 +97,7 @@ def parse_args():
     parser.add_argument(
         "--window_size",
         type=int,
-        default=7,
+        default=4,
         help="Window size for watermarking (VOW)",
     )
     parser.add_argument(
@@ -243,19 +244,58 @@ def main():
             tokenizer=tokenizer,
             timing=False,
         )
+    elif args.method == "upv":
+        adapter = UPVAdapter(
+            model,
+            tokenizer,
+            "experiments/upv_baseline/model",
+            window_size=4,
+            delta=2.0,
+            bit_number=18,
+            layers=5,
+            beam_size=0,
+        )
     else:
         raise ValueError(f"Unknown watermarking method: {args.method}")
 
-    dataset = get_dataset(args.dataset).select(range(args.num))
+    existing_num = 0
+    if output_file_path.exists():
+        existing_samples = list(io_utils.read_jsonlines(output_file_path))
+        existing_num = len(existing_samples)
+        if existing_num < args.num:
+            print(
+                f"Resuming generation: {existing_num} samples already exist in {output_file_path}"
+            )
+        else:
+            print(
+                f"Output file {output_file_path} already has {existing_num} samples. "
+                "Skipping generation."
+            )
+            return
+
+    dataset = get_dataset(args.dataset).select(range(existing_num, args.num))
     print(f"Dataset contains {len(dataset)} samples")
 
     stop_strings = None
-    if args.model.endswith("Instruct"):
-        stop_strings = INSTRUCT_STOP_STRINGS
+    # if args.model.endswith("Instruct"):
+    #     stop_strings = INSTRUCT_STOP_STRINGS
 
     prompt_formatter = None
     if args.dataset == "eli5":
-        prompt_formatter = eli5_prompt_formatter
+        args.prompt_column = "question"
+        if getattr(tokenizer, "chat_template", None) is not None:
+
+            def prompt_formatter(question):
+                messages = [
+                    {"role": "system", "content": ELI5_SYSTEM_MESSAGE},
+                    {"role": "user", "content": question},
+                ]
+                return tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True
+                )
+
+        else:
+            prompt_formatter = eli5_prompt_formatter
 
     # writing metadata
     metadata = vars(args)
@@ -288,7 +328,7 @@ def main():
 
         records = [dict(zip(batch.keys(), values)) for values in zip(*batch.values())]
         io_utils.write_jsonlines(output_file_path, records, mode="a")
-    
+
     print(f"gamma = {args.gamma}, delta = {args.delta}, top-k = {args.top_k}")
 
 

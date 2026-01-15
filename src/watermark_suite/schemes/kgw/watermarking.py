@@ -37,6 +37,7 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
 
         self.store_spike_ents = store_spike_ents
         self.spike_entropies = None
+        self.mode = "standard"
         if self.store_spike_ents:
             self._init_spike_entropies()
 
@@ -124,6 +125,47 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
                 pass  # do not break early
         return torch.as_tensor(final_greenlist, device=input_ids.device)
 
+    def _rejection_sampling(
+        self, input_ids: torch.LongTensor, scores: torch.FloatTensor
+    ) -> torch.FloatTensor:
+        import math
+        import random
+
+        batch_size = input_ids.shape[0]
+        probs = torch.softmax(scores, dim=-1)
+
+        for b_idx in range(batch_size):
+            while True:
+                # 1. Sample from original distribution
+                candidate_idx = torch.multinomial(probs[b_idx], 1).item()
+                candidate_tensor = torch.tensor(
+                    [candidate_idx], device=input_ids.device
+                )
+
+                # 2. Check if Green (Efficiently for single token)
+                # For SelfHash: Seed depends on (history + candidate)
+                greenlist_ids = self._get_greenlist_ids(
+                    torch.cat([input_ids[b_idx], candidate_tensor], dim=0)
+                )
+
+                is_green = candidate_idx in greenlist_ids
+
+                # 3. Accept/Reject
+                if is_green:
+                    selected = candidate_idx
+                    break
+                else:
+                    # Accept Red with probability 1/e^delta
+                    if random.random() < (1.0 / math.exp(self.delta)):
+                        selected = candidate_idx
+                        break
+
+            # Set scores to deterministic one-hot-like for the sampler
+            scores[b_idx, :] = -float("inf")
+            scores[b_idx, selected] = 1000.0
+
+        return scores
+
     def __call__(
         self, input_ids: torch.LongTensor, scores: torch.FloatTensor
     ) -> torch.FloatTensor:
@@ -133,6 +175,9 @@ class WatermarkLogitsProcessor(WatermarkBase, LogitsProcessor):
         self.rng = (
             torch.Generator(device=input_ids.device) if self.rng is None else self.rng
         )
+
+        if self.self_salt and hasattr(self, "mode") and self.mode == "sample":
+            return self._rejection_sampling(input_ids, scores)
 
         # NOTE, it would be nice to get rid of this batch loop, but currently,
         # the seed and partition operations are not tensor/vectorized, thus
@@ -195,4 +240,8 @@ class KGWAdapter(WatermarkAdapter):
     def get_logits_processor(
         self, do_sample: bool, num_beams: int, top_k: float | None
     ) -> LogitsProcessorList | None:
+        if do_sample and (top_k is None or top_k <= 0):
+            self.logits_processor.mode = "sample"
+        else:
+            self.logits_processor.mode = "standard"
         return self.logits_processor

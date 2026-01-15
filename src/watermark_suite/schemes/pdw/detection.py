@@ -2,6 +2,7 @@ import pickle
 import time
 
 from petlib.pack import decode
+from tqdm import tqdm
 
 from ..detector import DetectionCost, DetectionResult, WatermarkDetector
 from .detect import search_for_asymmetric_watermark
@@ -46,7 +47,7 @@ class PDWDetector(WatermarkDetector):
     ) -> tuple[list[DetectionResult], list[DetectionCost]]:
         results = []
         costs = []
-        for text in texts:
+        for text in tqdm(texts, desc="PDW Detection"):
             start = time.perf_counter()
             is_watermarked = search_for_asymmetric_watermark(
                 self.pk,
@@ -58,9 +59,6 @@ class PDWDetector(WatermarkDetector):
                 self.max_planted_errors,
             )
             end = time.perf_counter()
-            print(
-                f"PDW Detection: is_watermarked={is_watermarked}, time: {end-start:.2f} s"
-            )
             costs.append(DetectionCost(token_num=1, total_time=end - start))
             results.append(
                 PDWDetectionResult(

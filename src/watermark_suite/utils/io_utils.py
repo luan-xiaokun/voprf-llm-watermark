@@ -50,7 +50,15 @@ import warnings
 from collections.abc import Generator
 from pathlib import Path
 
-WATERMARKING_METHODS = ["vow", "lefthash", "selfhash", "rdf", "no-watermark", "pdw"]
+WATERMARKING_METHODS = [
+    "vow",
+    "lefthash",
+    "selfhash",
+    "rdf",
+    "no-watermark",
+    "pdw",
+    "upv",
+]
 DATASET_NAMES = ["c4", "eli5"]
 MODIFICATIONS = ["synonym-substituted", "paraphrased"]
 
@@ -157,6 +165,8 @@ def watermark_parameter_dict_to_string(method: str, params: dict) -> str:
         return f"l{length}_s{seed}_{watermark_device}"
     if method == "pdw":
         return ""
+    if method == "upv":
+        return "18bits_5layers"
     raise ValueError(f"Unknown watermarking method: {method}")
 
 

@@ -11,6 +11,7 @@ from watermark_suite.core import detect_texts
 from watermark_suite.core.detect import compute_auc_at_milestones
 from watermark_suite.core.metrics import calculate_perplexity
 from watermark_suite.schemes import KGWDetector, PDWDetector, RDFDetector, VOWDetector
+from watermark_suite.schemes.upv import UPVDetector
 from watermark_suite.schemes.vow.key import get_server_seed
 from watermark_suite.utils import io_utils
 
@@ -42,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "method",
         type=str,
-        choices=["lefthash", "selfhash", "rdf", "vow", "pdw"],
+        choices=["lefthash", "selfhash", "rdf", "vow", "pdw", "upv"],
         help="Watermarking method",
     )
     parser.add_argument(
@@ -66,7 +67,7 @@ def parse_args():
     parser.add_argument(
         "--target_column",
         type=str,
-        default="generated_text",
+        default=DEFAULT_TARGET_COLUMN,
         help="Column name for the generated text",
     )
     parser.add_argument(
@@ -135,9 +136,6 @@ def parse_args():
         "--top_k", type=int, default=None, help="Top-k sampling parameter"
     )
     parser.add_argument(
-        "--no_watermark", action="store_true", help="Disable watermarking"
-    )
-    parser.add_argument(
         "--step_size", type=int, default=None, help="Step size for TPR calculation"
     )
     parser.add_argument(
@@ -189,6 +187,9 @@ def main():
     input_file_name = io_utils.get_file_name(
         args.method, args.tokenizer, args.dataset, vars(args), do_sample, args.top_k
     )
+    # input_file_name = (
+    #     "no-watermark_Llama-3.1-8B-Instruct-unsloth-bnb-4bit_eli5_top-50.jsonl"
+    # )
     input_dir = Path(args.input_dir).expanduser().resolve()
     input_file_path = input_dir / input_file_name
 
@@ -219,8 +220,6 @@ def main():
             normalizers=[],
             ignore_repeated_ngrams=True,
         )
-        if args.step_size:
-            detect_kwargs.update(dict(return_z_at_T=True))
     elif args.method == "rdf":
         detector = RDFDetector(
             tokenizer,
@@ -230,6 +229,14 @@ def main():
         )
     elif args.method == "pdw":
         detector = PDWDetector()
+    elif args.method == "upv":
+        detector = UPVDetector(
+            tokenizer,
+            "experiments/upv_baseline/model",
+            window_size=4,
+            bits_num=18,
+            gamma=0.5,
+        )
     else:
         raise ValueError(f"Unknown watermarking method: {args.method}")
 
@@ -263,7 +270,7 @@ def main():
 
     final_result = detect_texts(
         detector,
-        texts,
+        [t for t in texts if t.strip() != ""],
         token_num=args.token_num,
         significance_levels=args.significance_levels,
         use_local=args.use_local,
@@ -306,7 +313,7 @@ def main():
         )
         prefix = args.target_column
         plot_data_file = prefix + "_" + input_file_name.replace(".jsonl", ".json")
-        plot_data_dir = Path("data/plot_data")
+        plot_data_dir = Path("data/plot_data/robustness")
         plot_data_dir.mkdir(parents=True, exist_ok=True)
         io_utils.write_json(
             plot_data_dir / plot_data_file,
@@ -314,6 +321,7 @@ def main():
                 "tpr_dict": tpr_dict,
                 "p_value_median": p_value_median,
                 "auc": auc,
+                "step_size": step_size,
                 "tpr_per_step": tpr_per_step,
                 "auc_per_step": auc_per_step,
             },

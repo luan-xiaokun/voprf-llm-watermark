@@ -118,7 +118,7 @@ def plot_synonym_replacement_results():
         handles.extend(h)
         labels.extend(l)
     unique_labels_map = dict(zip(labels, handles))
-    fig.suptitle(" ") 
+    fig.suptitle(" ")
     fig.legend(
         unique_labels_map.values(),
         unique_labels_map.keys(),

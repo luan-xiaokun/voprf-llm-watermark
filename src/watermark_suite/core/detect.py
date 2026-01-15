@@ -14,138 +14,54 @@ def compute_avg_tpr_at_milestones(
     step_size: int,
 ) -> dict[float, list[float]]:
     if not results:
-        return
+        return {}
 
-    res = results[0]
     tpr_at_milestones = defaultdict(list)
+    max_steps = 0
+    for r in results:
+        if r.step_p_values:
+            max_steps = max(max_steps, len(r.step_p_values))
 
-    # for RDF, using `p_value_at_milestones`
-    if hasattr(res, "p_value_at_milestones") and res.p_value_at_milestones:
-        max_len = max(len(r.p_value_at_milestones) for r in results)
-        for i in range(max_len):
-            p_values = [
-                (
-                    r.p_value_at_milestones[i]
-                    if len(r.p_value_at_milestones) > i
-                    else r.p_value_at_milestones[-1]
-                )
-                for r in results
-                if r.p_value_at_milestones
-            ]
-            for sl in significance_levels:
-                tpr = sum(p < sl for p in p_values) / len(p_values) if p_values else 0.0
-                tpr_at_milestones[sl].append(tpr)
-        return tpr_at_milestones
+    for i in range(max_steps):
+        p_values = []
+        for r in results:
+            if r.step_p_values and i < len(r.step_p_values):
+                p_values.append(r.step_p_values[i])
+            else:
+                p_values.append(r.p_value)
 
-    # for KGW, using `z_score_at_T`
-    if hasattr(res, "z_score_at_T") and res.z_score_at_T is not None:
-        max_len = max(len(r.z_score_at_T) for r in results)
-        milestones = range(0, max_len, step_size)
-        z_thresholds = [float(stats.norm.ppf(1 - sl)) for sl in significance_levels]
-        for i in milestones:
-            z_scores = [
-                (
-                    r.z_score_at_T[i].item()
-                    if len(r.z_score_at_T) > i
-                    else r.z_score_at_T[-1].item()
-                )
-                for r in results
-                if r.z_score_at_T is not None and len(r.z_score_at_T) > 0
-            ]
-            for t, sl in zip(z_thresholds, significance_levels):
-                tpr = sum(z > t for z in z_scores) / len(z_scores) if z_scores else 0.0
-                tpr_at_milestones[sl].append(tpr)
-        return tpr_at_milestones
+        for sl in significance_levels:
+            tpr = sum(p < sl for p in p_values) / len(p_values) if p_values else 0.0
+            tpr_at_milestones[sl].append(tpr)
 
-    # for VOW, using `p_value_per_token`
-    if hasattr(res, "p_values_per_token") and res.p_values_per_token:
-        max_len = max(len(r.p_values_per_token) for r in results)
-        milestones = range(0, max_len, step_size)
-        for i in milestones:
-            p_values = [
-                (
-                    r.p_values_per_token[i]
-                    if len(r.p_values_per_token) > i
-                    else r.p_values_per_token[-1]
-                )
-                for r in results
-                if r.p_values_per_token
-            ]
-            for sl in significance_levels:
-                tpr = sum(p < sl for p in p_values) / len(p_values) if p_values else 0.0
-                tpr_at_milestones[sl].append(tpr)
-        return tpr_at_milestones
-
-    raise ValueError(f"Unknown detection result with keys: {vars(res)}")
+    return tpr_at_milestones
 
 
 def compute_auc_at_milestones(
     results: list[DetectionResult], negative_indices: list[int], step_size: int
 ) -> list[float]:
-    res = results[0]
     auc_at_milestones = []
+    max_steps = 0
+    for r in results:
+        if r.step_p_values:
+            max_steps = max(max_steps, len(r.step_p_values))
 
-    # for RDF, using `p_value_at_milestones`
-    if hasattr(res, "p_value_at_milestones") and res.p_value_at_milestones:
-        max_len = max(len(r.p_value_at_milestones) for r in results)
-        for i in range(max_len):
-            y_score = []
-            y_true = []
-            for j, r in enumerate(results):
-                if not r.p_value_at_milestones:
-                    continue
-                if len(r.p_value_at_milestones) > i:
-                    score = r.p_value_at_milestones[i]
-                else:
-                    score = r.p_value_at_milestones[-1]
-                label = 2 if j in negative_indices else 1
-                y_score.append(score)
-                y_true.append(label)
-            auc = roc_auc_score(y_true, y_score)
-            auc_at_milestones.append(auc)
-        return auc_at_milestones
+    for i in range(max_steps):
+        y_score = []
+        y_true = []
+        for j, r in enumerate(results):
+            if r.step_p_values and i < len(r.step_p_values):
+                score = r.step_p_values[i]
+            else:
+                score = r.p_value
 
-    # for KGW, using `z_score_at_T`
-    if hasattr(res, "z_score_at_T") and res.z_score_at_T is not None:
-        max_len = max(len(r.z_score_at_T) for r in results)
-        for i in range(0, max_len, step_size):
-            y_score = []
-            y_true = []
-            for j, r in enumerate(results):
-                if r.z_score_at_T is None or len(r.z_score_at_T) == 0:
-                    continue
-                if len(r.z_score_at_T) > i:
-                    score = r.z_score_at_T[i].item()
-                else:
-                    score = r.z_score_at_T[-1].item()
-                label = 0 if j in negative_indices else 1
-                y_score.append(score)
-                y_true.append(label)
-            auc = roc_auc_score(y_true, y_score)
-            auc_at_milestones.append(auc)
-        return auc_at_milestones
+            label = 2 if j in negative_indices else 1
+            y_score.append(score)
+            y_true.append(label)
+        auc = roc_auc_score(y_true, y_score)
+        auc_at_milestones.append(auc)
 
-    # for VOW, using `p_value_per_token`
-    if hasattr(res, "p_values_per_token") and res.p_values_per_token:
-        max_len = max(len(r.p_values_per_token) for r in results)
-        for i in range(0, max_len, step_size):
-            y_score = []
-            y_true = []
-            for j, r in enumerate(results):
-                if not r.p_values_per_token:
-                    continue
-                if len(r.p_values_per_token) > i:
-                    score = r.p_values_per_token[i]
-                else:
-                    score = r.p_values_per_token[-1]
-                label = 2 if j in negative_indices else 1
-                y_score.append(score)
-                y_true.append(label)
-            auc = roc_auc_score(y_true, y_score)
-            auc_at_milestones.append(auc)
-        return auc_at_milestones
-
-    raise ValueError(f"Unknown detection result with keys: {vars(res)}")
+    return auc_at_milestones
 
 
 def detect_texts(
@@ -161,6 +77,7 @@ def detect_texts(
     include_raw_costs: bool = False,
     **kwargs,
 ) -> dict:
+    print(f"Detecting {len(texts)} texts")
     if significance_levels is None:
         significance_levels = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2]
 
@@ -207,6 +124,8 @@ def detect_texts(
         tpr_dict[sl] = detected_num / len(filtered_results)
     final_result["tpr_dict"] = tpr_dict
 
+    final_result["all_p_values"] = [r.p_value for r in filtered_results]
+
     # 2. calculate median of p-values
     p_value_array = np.array([r.p_value for r in filtered_results])
     p_value_median = np.median(p_value_array)
@@ -241,7 +160,9 @@ def detect_texts(
     final_result["overhead_per_sample"] = overhead_per_sample
 
     # 6. calculate average tokens per sample
-    avg_tokens_per_sample = float(np.mean([r.total_token_num for r in filtered_results]))
+    avg_tokens_per_sample = float(
+        np.mean([r.total_token_num for r in filtered_results])
+    )
     final_result["avg_tokens_per_sample"] = avg_tokens_per_sample
 
     if include_raw_costs:

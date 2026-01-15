@@ -1,7 +1,10 @@
 import argparse
 from pathlib import Path
 
-from watermark_suite.attacks.paraphrase import paraphrase_texts_by_deepseek
+from watermark_suite.attacks.paraphrase import (
+    paraphrase_texts_by_deepseek,
+    paraphrase_texts_by_openai,
+)
 from watermark_suite.attacks.synonym_replacement import SynonymReplacer
 from watermark_suite.utils import io_utils
 
@@ -16,7 +19,7 @@ def parse_args():
     parser.add_argument(
         "method",
         type=str,
-        choices=["lefthash", "selfhash", "rdf", "vow", "pdw"],
+        choices=["lefthash", "selfhash", "rdf", "vow", "pdw", "upv"],
         help="Watermarking method",
     )
     parser.add_argument(
@@ -96,6 +99,24 @@ def parse_args():
     parser.add_argument(
         "--top_k", type=int, default=None, help="Top-k sampling parameter"
     )
+    parser.add_argument(
+        "--openai_model",
+        type=str,
+        default="gpt-3.5-turbo",
+        help="OpenAI model to use (default: gpt-3.5-turbo)",
+    )
+    parser.add_argument(
+        "--use_batch",
+        action="store_true",
+        help="Use OpenAI Batch API for paraphrasing to save costs",
+    )
+    parser.add_argument(
+        "--batch_id",
+        type=str,
+        default=None,
+        help="Batch ID to retrieve results for",
+    )
+    parser.add_argument("--no_watermark", action="store_true", help="No watermarking")
     return parser.parse_args()
 
 
@@ -104,6 +125,9 @@ def main():
 
     # prepare parameters and input file
     do_sample = not args.greedy
+
+    if args.no_watermark:
+        args.method = "no-watermark"
 
     input_file_name = io_utils.get_file_name(
         args.method, args.model, args.dataset, vars(args), do_sample, args.top_k
@@ -123,11 +147,32 @@ def main():
         updates["synonym_replaced"] = synonym_replaced_texts
 
     if args.paraphrase:
-        paraphrased_texts = paraphrase_texts_by_deepseek(texts)
-        updates["paraphrased"] = paraphrased_texts
+        # paraphrased_texts = paraphrase_texts_by_deepseek(texts)
+        if args.openai_model == "deepseek":
+            paraphrased_texts = paraphrase_texts_by_deepseek(texts)
+        else:
+            paraphrased_texts = paraphrase_texts_by_openai(
+                texts,
+                model_name=args.openai_model,
+                use_batch=args.use_batch,
+                batch_id=args.batch_id,
+            )
+        if paraphrased_texts is not None:
+            updates[f"paraphrased-{args.openai_model}"] = paraphrased_texts
 
     io_utils.merge_and_write_jsonl(input_file_path, samples, updates)
 
 
 if __name__ == "__main__":
     main()
+
+
+# ❯ uv run experiments/run_attack.py vow --paraphrase --top_k 50 --window_size 1 --gamma 0.5 --delta 2.5 --model unsloth/Llama-3.1-8B-Instruct-unsloth-bnb-4bit --openai_model gpt-5.2 --use_batch
+# Downloading required NLTK data... (punkt, averaged_perceptron_tagger)
+# Download complete.
+# Loading text from /home/lxk/projects/voprf/output/generation/vow_Llama-3.1-8B-Instruct-unsloth-bnb-4bit_eli5_top-50_w1_d2.5_g0.5.jsonl
+# Generating batch input file batch_input_20260108-153538.jsonl...
+# Submitting batch job...
+# Batch job submitted! Batch ID: batch_695f5e4c7c7c8190acbd507c33fc79ba
+# Please save this ID. Re-run with --batch_id batch_695f5e4c7c7c8190acbd507c33fc79ba to retrieve results later (up to 24h).
+# Successfully merged results and updated /home/lxk/projects/voprf/output/generation/vow_Llama-3.1-8B-Instruct-unsloth-bnb-4bit_eli5_top-50_w1_d2.5_g0.5.jsonl

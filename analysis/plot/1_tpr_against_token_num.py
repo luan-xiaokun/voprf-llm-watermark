@@ -33,6 +33,14 @@ def load_kgw_records(
     return np.array(tpr_list)
 
 
+def load_upv_records():
+    file_name = "generated_text_upv_Qwen2.5-3B_c4_multinomial_18bits_5layers.json"
+    with open(f"data/plot_data/{file_name}") as f:
+        records = json.load(f)
+    tpr_list = records["tpr_per_step"]["1e-06"]
+    return tpr_list, 10
+
+
 def make_violin_plot():
     fig, ax = plt.subplots(figsize=(3.2, 1.8), layout="constrained")
 
@@ -77,6 +85,10 @@ def main():
     sampled_selfhash_tpr_array = selfhash_tpr_array[::5]
     sampled_x_selfhash = np.arange(len(selfhash_tpr_array))[::5]
 
+    upv_tpr_list, step_size = load_upv_records()
+    sampled_upv_tpr_array = np.array([0] + upv_tpr_list)
+    sampled_x_upv = np.arange(len(sampled_upv_tpr_array)) * step_size
+
     pdw_tpr_array = np.zeros(len(sampled_x_selfhash))
     sampled_x_pdw = sampled_x_selfhash
     print(
@@ -86,16 +98,21 @@ def main():
         len(rdf_tpr_array),
     )
 
-    fig, ax = plt.subplots(figsize=(3.2, 1.8), layout="constrained")
-    ax.plot(sampled_x_vow, sampled_vow_tpr_array, label="VOW")
-    ax.plot(sampled_x_lefthash, sampled_lefthash_tpr_array, label="LeftHash")
-    ax.plot(sampled_x_selfhash, sampled_selfhash_tpr_array, label="SelfHash")
-    ax.plot(sampled_x_rdf, rdf_tpr_array, label="RDF", linestyle="--")
+    fig, ax = plt.subplots(figsize=(3.2, 1.7), layout="constrained")
+    ax.plot(sampled_x_vow, sampled_vow_tpr_array, label="VOW", linewidth=1.0)
+    ax.plot(
+        sampled_x_lefthash, sampled_lefthash_tpr_array, label="LeftHash", linewidth=1.0
+    )
+    ax.plot(
+        sampled_x_selfhash, sampled_selfhash_tpr_array, label="SelfHash", linewidth=1.0
+    )
+    ax.plot(sampled_x_rdf, rdf_tpr_array, label="RDF", linestyle="--", linewidth=1.0)
+    ax.plot(sampled_x_upv, sampled_upv_tpr_array, label="UPV", linewidth=1.0)
     # ax.plot(sampled_x_pdw, pdw_tpr_array, label="PDW", linestyle=":")
     ax.grid(which="major", linestyle=":", alpha=0.7)
 
     ax.set_xlabel("Number of Tokens")
-    ax.set_ylabel("True Positive Rate (TPR)")
+    ax.set_ylabel("True Positive Rate")
     ax.legend()
     # plt.tight_layout()
     plt.savefig("figures/evaluation/tpr_against_token_num_vow.pdf", dpi=300)

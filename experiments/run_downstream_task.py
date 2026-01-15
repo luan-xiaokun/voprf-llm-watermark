@@ -13,6 +13,7 @@ from watermark_suite.schemes import (
     VOWAdapter,
     WatermarkAdapter,
 )
+from watermark_suite.schemes.upv import UPVAdapter
 from watermark_suite.schemes.vow.key import get_server_seed
 from watermark_suite.utils import io_utils
 
@@ -41,7 +42,7 @@ def parse_args():
         "--method",
         type=str,
         default=None,
-        choices=["vow", "lefthash", "selfhash", "rdf", "pdw"],
+        choices=["vow", "lefthash", "selfhash", "rdf", "pdw", "upv"],
         help="Watermarking method",
     )
     parser.add_argument(
@@ -154,6 +155,16 @@ def main():
             model=model,
             tokenizer=tokenizer,
             timing=False,
+        )
+    elif args.method == "upv":
+        adapter = UPVAdapter(
+            model,
+            tokenizer,
+            "experiments/upv_baseline/model",
+            window_size=4,
+            delta=2.0,
+            bit_number=18,
+            gamma=0.5,
         )
     else:
         raise ValueError(f"Unknown watermarking method: {args.method}")

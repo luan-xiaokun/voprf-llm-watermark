@@ -108,7 +108,10 @@ def shift_generate(
     unfinished_sequences = torch.ones(batch_size, dtype=torch.bool, device=self.device)
 
     past_key_values = None
-    attention_mask = torch.ones_like(inputs)
+    if "attention_mask" in kwargs:
+        attention_mask = kwargs["attention_mask"].to(self.device)
+    else:
+        attention_mask = torch.ones_like(inputs)
 
     end = time.perf_counter()
     print(f"Time taken before entering loop: {end - start:.4f} seconds")

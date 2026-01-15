@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from scipy import special
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from tqdm import tqdm
 from voprf_py import (
     BlindedElement,
     EvaluationElement,
@@ -76,6 +77,7 @@ class VOWDetector(WatermarkDetector):
         include_p_values_per_token: bool = False,
         return_green_token_mask: bool = False,
         token_num: int | None = None,
+        step_size: int | None = None,
     ) -> VOWDetectionResult:
         return self.local_batch_detect(
             [text],
@@ -84,6 +86,7 @@ class VOWDetector(WatermarkDetector):
             include_p_values_per_token=include_p_values_per_token,
             return_green_token_mask=return_green_token_mask,
             token_num=token_num,
+            step_size=step_size,
         )[0]
 
     def local_batch_detect(
@@ -94,9 +97,13 @@ class VOWDetector(WatermarkDetector):
         include_p_values_per_token: bool = False,
         return_green_token_mask: bool = False,
         token_num: int | None = None,
+        step_size: int | None = None,
     ) -> list[VOWDetectionResult]:
         gamma = gamma or self.gamma
         window_size = window_size or self.window_size
+
+        if step_size is not None and step_size > 0:
+            include_p_values_per_token = True
 
         token_ids_list = [
             self.tokenizer.encode(text, add_special_tokens=False) for text in texts
@@ -195,6 +202,19 @@ class VOWDetector(WatermarkDetector):
                 p_values_per_token=p_values,
                 green_token_mask=green_token_mask,
             )
+            if step_size is not None and step_size > 0 and p_values:
+                milestones = list(
+                    range(step_size, len(token_ids_list[i]) + 1, step_size)
+                )
+                valid_milestones = [m for m in milestones if m > window_size]
+                indices = [m - window_size - 1 for m in valid_milestones]
+                indices = [idx for idx in indices if idx < len(p_values)]
+                final_milestones = [valid_milestones[k] for k in range(len(indices))]
+
+                detect_result.step_size = step_size
+                detect_result.milestones = final_milestones
+                detect_result.step_p_values = [p_values[idx] for idx in indices]
+
             results.append(detect_result)
 
         return results
@@ -209,6 +229,7 @@ class VOWDetector(WatermarkDetector):
         gamma: float | None = None,
         window_size: int | None = None,
         token_num: int | None = None,
+        step_size: int | None = None,
     ) -> VOWDetectionResult:
         results, _ = self.batch_detect(
             [text],
@@ -217,6 +238,7 @@ class VOWDetector(WatermarkDetector):
             gamma=gamma,
             window_size=window_size,
             token_num=token_num,
+            step_size=step_size,
         )
         return results[0]
 
@@ -230,6 +252,7 @@ class VOWDetector(WatermarkDetector):
         gamma: float | None = None,
         window_size: int | None = None,
         token_num: int | None = None,
+        step_size: int | None = None,
     ) -> tuple[list[VOWDetectionResult], list[VOWDetectionCost]]:
         gamma = gamma or self.gamma
         window_size = window_size or self.window_size
@@ -239,12 +262,11 @@ class VOWDetector(WatermarkDetector):
         detection_results = []
         detection_costs = []
 
-        for text in texts:
+        for text in tqdm(texts, desc="Detecting"):
             preparation_start = time.perf_counter()
             token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-            if token_num is None:
-                token_num = len(token_ids)
-            token_ids = token_ids[:token_num]
+            current_token_num = len(token_ids) if token_num is None else token_num
+            token_ids = token_ids[:current_token_num]
             n_grams = [
                 tuple(token_ids[i - window_size : i + 1])
                 for i in range(window_size, len(token_ids))
@@ -297,6 +319,31 @@ class VOWDetector(WatermarkDetector):
                 )
 
             green_token_num = sum(h < threshold_bytes for h in msg_hashes)
+
+            p_values = None
+            if step_size is not None and step_size > 0:
+                gram_to_color_map = {
+                    gram: h < threshold_bytes
+                    for gram, h in zip(unique_n_grams, msg_hashes)
+                }
+                p_values = []
+                cur_green = 0
+                cur_effective = 0
+                seen_grams = set()
+                for gram in n_grams:
+                    if gram not in seen_grams:
+                        seen_grams.add(gram)
+                        cur_green += gram_to_color_map[gram]
+                        cur_effective += 1
+                        val = float(
+                            special.betainc(
+                                cur_green, cur_effective - cur_green + 1, gamma
+                            )
+                        )
+                    else:
+                        val = p_values[-1] if p_values else 1.0
+                    p_values.append(val)
+
             effective_token_num = len(unique_n_grams)
             total_token_num = len(token_ids)
             if effective_token_num > 0:
@@ -320,9 +367,19 @@ class VOWDetector(WatermarkDetector):
                 total_token_num=total_token_num,
                 green_ratio=green_ratio,
                 p_value=p_value,
-                p_values_per_token=None,
+                p_values_per_token=p_values,
                 green_token_mask=None,
             )
+            if step_size is not None and step_size > 0 and p_values:
+                milestones = list(range(step_size, total_token_num + 1, step_size))
+                valid_milestones = [m for m in milestones if m > window_size]
+                indices = [m - window_size - 1 for m in valid_milestones]
+                indices = [idx for idx in indices if idx < len(p_values)]
+                final_milestones = [valid_milestones[k] for k in range(len(indices))]
+                detect_result.step_size = step_size
+                detect_result.milestones = final_milestones
+                detect_result.step_p_values = [p_values[idx] for idx in indices]
+
             detect_cost = VOWDetectionCost(
                 raw_string_bytes=len(text.encode("utf-8")),
                 token_num=len(token_ids),

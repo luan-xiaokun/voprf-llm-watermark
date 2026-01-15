@@ -28,6 +28,7 @@ from math import sqrt
 import scipy.stats
 import torch
 from tokenizers import Tokenizer
+from tqdm import tqdm
 
 from ..detector import DetectionCost, DetectionResult, WatermarkDetector
 from .base import WatermarkBase
@@ -432,6 +433,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         return score_dict
 
     @staticmethod
+    @staticmethod
     def _build_detection_result_from_dict(output_dict: dict):
         p_value = output_dict.get("p_value", float("nan"))
         total_token_num = output_dict.get("total_token_num", 0)
@@ -443,6 +445,11 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         window_list = output_dict.get("window_list", None)
         z_score_at_T = output_dict.get("z_score_at_T", None)
 
+        step_size = output_dict.get("step_size", None)
+        milestones = output_dict.get("milestones", None)
+        step_p_values = output_dict.get("step_p_values", None)
+        step_scores = output_dict.get("step_scores", None)
+
         return KGWDetectionResult(
             p_value=p_value,
             total_token_num=total_token_num,
@@ -453,6 +460,10 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
             green_token_mask=green_token_mask,
             window_list=window_list,
             z_score_at_T=z_score_at_T,
+            step_size=step_size,
+            milestones=milestones,
+            step_p_values=step_p_values,
+            step_scores=step_scores,
         )
 
     def detect(
@@ -468,6 +479,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         z_threshold: float = None,
         convert_to_float: bool = False,
         return_z_at_T: bool = False,
+        step_size: int | None = None,
         **kwargs,
     ) -> KGWDetectionResult:
         """Scores a given string of text and returns a dictionary of results."""
@@ -479,6 +491,9 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
             kwargs["return_p_value"] = (
                 True  # to return the "confidence":=1-p of positive detections
             )
+
+        if step_size is not None and step_size > 0:
+            return_z_at_T = True
 
         # run optional normalizers on text
         for normalizer in self.normalizers:
@@ -541,6 +556,36 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
             if output_dict["prediction"]:
                 output_dict["confidence"] = 1 - score_dict["p_value"]
 
+        # Handle incremental detection results
+        if (
+            step_size is not None
+            and step_size > 0
+            and "z_score_at_T" in score_dict
+            and score_dict["z_score_at_T"] is not None
+            and len(score_dict["z_score_at_T"]) > 0
+        ):
+            z_at_T_tensor = score_dict["z_score_at_T"]
+            milestones = list(range(step_size, token_num + 1, step_size))
+            valid_milestones = [m for m in milestones if m > self.context_width]
+
+            indices = [m - self.context_width - 1 for m in valid_milestones]
+            indices = [
+                min(i, len(z_at_T_tensor) - 1)
+                for i in indices
+                if i < len(z_at_T_tensor)
+            ]
+
+            if indices:
+                step_scores_tensor = z_at_T_tensor[indices]
+                step_scores = step_scores_tensor.tolist()
+                step_p_values = [float(self._compute_p_value(z)) for z in step_scores]
+                final_milestones = valid_milestones[: len(indices)]
+
+                output_dict["step_size"] = step_size
+                output_dict["milestones"] = final_milestones
+                output_dict["step_scores"] = step_scores
+                output_dict["step_p_values"] = step_p_values
+
         # convert any numerical values to float if requested
         if convert_to_float:
             for key, value in output_dict.items():
@@ -562,12 +607,13 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         return_scores: bool = True,
         z_threshold: float = None,
         convert_to_float: bool = False,
+        step_size: int | None = None,
         **kwargs,
     ) -> tuple[list[KGWDetectionResult], list[KGWDetectionCost]]:
         results = []
         costs = []
 
-        for text in texts:
+        for text in tqdm(texts, desc="Detecting"):
             start_time = time.perf_counter()
 
             result = self.detect(
@@ -580,6 +626,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
                 return_scores=return_scores,
                 z_threshold=z_threshold,
                 convert_to_float=convert_to_float,
+                step_size=step_size,
                 **kwargs,
             )
 

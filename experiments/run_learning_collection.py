@@ -14,9 +14,9 @@ from watermark_suite.utils import io_utils
 
 PROMPT_TEXT_LENGTH = 120
 BATCH_SIZE = 4096
-SAMPLE_NUM = 5120
+SAMPLE_NUM = 64
 TOKEN_PER_SAMPLE = 200
-WINDOW_SIZE = 4
+WINDOW_SIZE = 1
 DELTA = 2.5
 GAMMA = 0.5
 TOP_K = None
@@ -26,7 +26,7 @@ HASH_BITS = 512
 
 
 def main():
-    output_file = "data/learning_collection_vow_multinomial_w4_d2.5_g0.5.jsonl"
+    output_file = "data/learning_collection_vow_multinomial_w1_d2.5_g0.5.jsonl"
 
     dataset = load_dataset("allenai/c4", "realnewslike", split="train", streaming=True)
     dataset = dataset.take(SAMPLE_NUM)
@@ -89,8 +89,8 @@ def main():
 
 
 def build_green_cache():
-    green_cache_df = "data/green_cache_w4_g0.5_indexed.parquet"
-    output_file = "data/learning_collection_vow_multinomial_w4_d2.5_g0.5.jsonl"
+    green_cache_df = "data/green_cache_w1_g0.5_indexed.parquet"
+    output_file = "data/learning_collection_vow_multinomial_w1_d2.5_g0.5.jsonl"
     with open("data/server_seed") as f:
         seed = bytes.fromhex(f.read().strip())
 
@@ -147,13 +147,15 @@ def build_green_cache():
     green_cache = [(*grams, list(tokens)) for grams, tokens in green_cache.items()]
 
     df = pd.DataFrame(
-        green_cache, columns=["gram1", "gram2", "gram3", "gram4", "tokens"]
+        # green_cache, columns=["gram1", "gram2", "gram3", "gram4", "tokens"]
+        green_cache, columns=["gram1", "tokens"]
     )
     del green_cache
     gc.collect()
 
     print("Creating and sorting index...")
-    df_indexed = df.set_index(["gram1", "gram2", "gram3", "gram4"])
+    # df_indexed = df.set_index(["gram1", "gram2", "gram3", "gram4"])
+    df_indexed = df.set_index(["gram1"])
     df_indexed.sort_index(inplace=True)
 
     print(f"Saving green cache (DataFrame) to {green_cache_df}...")
@@ -161,6 +163,7 @@ def build_green_cache():
 
 
 if __name__ == "__main__":
+    main()
     build_green_cache()
 
 # Unique context num: 45270139

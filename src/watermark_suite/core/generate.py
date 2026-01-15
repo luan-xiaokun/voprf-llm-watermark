@@ -27,16 +27,16 @@ def generate_texts(
     adapter.to(device)
     adapter.eval()
 
-    print("Warming up...")
-    warmup_prompt = ["Just a test to warm up the GPU"]
-    _ = adapter(
-        prompts=warmup_prompt,
-        max_new_tokens=8,
-        pad_token_id=adapter.tokenizer.eos_token_id,
-        no_watermark=no_watermark,
-    )
-    torch.cuda.synchronize()
-    print("Warm-up finished")
+    # print("Warming up...")
+    # warmup_prompt = ["Just a test to warm up the GPU"]
+    # _ = adapter(
+    #     prompts=warmup_prompt,
+    #     max_new_tokens=8,
+    #     pad_token_id=adapter.tokenizer.eos_token_id,
+    #     no_watermark=no_watermark,
+    # )
+    # torch.cuda.synchronize()
+    # print("Warm-up finished")
 
     if prompt_formatter is None:
         prompt_formatter = lambda x: x

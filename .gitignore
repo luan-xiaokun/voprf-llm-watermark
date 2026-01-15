@@ -232,6 +232,8 @@ logs/
 models/
 output/
 src/watermark_suite/schemes/rdf/*.c
+figures/
+*.tar.*
 
 !/data/c4_realnewslike_subset_673.jsonl
 !/data/pdw

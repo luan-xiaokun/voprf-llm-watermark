@@ -55,7 +55,7 @@ def analyze_records(records: list[str]) -> list[dict]:
 
 
 def main():
-    green_cache = GreenCache("data/green_cache_w4_g0.5_indexed.parquet")
+    green_cache = GreenCache("data/green_cache_w1_g0.5_indexed.parquet")
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-3B", padding_side="left")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -66,14 +66,14 @@ def main():
     learning_adapter = LearningAdapter(
         model=model,
         tokenizer=tokenizer,
-        window_size=4,
+        window_size=1,
         delta=4.0,
         green_cache=green_cache,
     )
 
     with open("data/server_seed") as f:
         seed = bytes.fromhex(f.read().strip())
-    detector = VOWDetector(tokenizer, seed, gamma=0.5, window_size=4)
+    detector = VOWDetector(tokenizer, seed, gamma=0.5, window_size=1)
 
     dataset = load_dataset("data/eli5", split="train")
     dataset = dataset.take(500)
@@ -99,7 +99,7 @@ def main():
         )
 
         detection_results = detector.local_batch_detect(texts)
-        indices = [i for i, r in enumerate(detection_results) if r.p_value > 0.04]
+        indices = [i for i, r in enumerate(detection_results) if r.p_value > 0.05]
         indices = list(range(len(texts)))
         total += len(indices)
         print(

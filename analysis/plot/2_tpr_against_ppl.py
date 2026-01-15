@@ -26,7 +26,7 @@ baseline_records = {
 
 
 def main():
-    fig, ax = plt.subplots(figsize=(3.2, 2.0), layout="constrained")
+    fig, ax = plt.subplots(figsize=(3.2, 1.8), layout="constrained")
 
     texts = []
     for (gamma, delta), (tpr, ppl) in vow_records.items():
@@ -75,7 +75,7 @@ def main():
     ax.axvline(no_watermark_ppl, color="r", linestyle="--", label="Baseline PPL")
 
     ax.set_xlabel("Perplexity (better $\\rightarrow$)")
-    ax.set_ylabel("True positive rate (TPR)")
+    ax.set_ylabel("True positive rate")
 
     ax.invert_xaxis()
 

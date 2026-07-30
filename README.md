@@ -100,3 +100,49 @@ The script `experiments/run_detection.py` reads the configuration to load the co
 
 By default, the detection script checks the watermarks in the generated texts, and outputs the overall results.
 When the flag `--ppl` is passed, the script will additionally evaluate the perplexity of the texts, using a default evaluation model Qwen2.5-7B.
+
+### Adaptive forgery experiment
+
+The script `experiments/run_adaptive_forgery.py` evaluates a controlled
+watermark-forgery setting. A local language model fixes tokens from left to
+right and queries at most `k` high-probability candidates through the public
+blinded VOPRF interface. The forger receives no watermark key.
+
+For example:
+
+```shell
+uv run python experiments/run_adaptive_forgery.py \
+  --model Qwen/Qwen2.5-3B \
+  --dataset c4 \
+  --window_size 4 \
+  --gamma 0.5 \
+  -k 8 \
+  --trace_level compact
+```
+
+Per-sample JSONL results and an aggregate summary are written under
+`output/forgery`. The summary includes forgery success rates, green ratios,
+logical color-query counts, VOPRF rounds, fallback rates, and the observed
+query overhead relative to an honest audit. It also records local-model
+perplexity, the log-probability gap from the top-1 candidate, generation and
+oracle timing, and VOPRF communication bytes. Compact traces record the
+selected rank, color, fallback decision, query count, cache hits, cumulative
+queries, log-probability, and oracle time at every position. Use
+`--trace_level full` to additionally save contexts and candidate token IDs.
+
+Run quality evaluation separately so the generation model can be released
+before loading a larger evaluation model:
+
+```shell
+uv run python experiments/evaluate_adaptive_forgery.py \
+  output/forgery/adaptive-forgery_Qwen2.5-3B_c4_w4_g0p5_k8.jsonl \
+  --eval_model Qwen/Qwen2.5-7B \
+  --batch_size 2
+```
+
+The evaluator preserves the raw JSONL and writes a separate evaluated file.
+It reports conditional perplexity for each sample and in aggregate,
+negative log-likelihood, evaluation token length, distinct-1/2/4, and
+correlations between perplexity and query rate, green ratio, fallback rate,
+and detection p-value. Pass `--baseline_file` with an ordinary-generation
+JSONL to report the perplexity increase and ratio relative to the baseline.

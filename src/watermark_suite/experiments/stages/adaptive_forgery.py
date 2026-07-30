@@ -23,6 +23,7 @@ from ..adapters import (
 from ..errors import PlanValidationError
 from ..identity import derived_seed, identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
+from ..scheme_registry import WATERMARK_SCHEMES
 from .common import (
     batches,
     format_prompt,
@@ -32,7 +33,6 @@ from .common import (
     resolve_model,
     validate_execution_settings,
 )
-from .watermarks import resolve_watermark, validated_seed
 
 
 def describe(values: list[float | int]) -> JsonObject:
@@ -377,7 +377,7 @@ class AdaptiveForgeryStageAdapter:
             repository=context.repository,
             num_samples=settings["num_samples"],
         )
-        watermark = resolve_watermark(
+        watermark = WATERMARK_SCHEMES.resolve(
             settings["watermark"], context.repository
         )
         if watermark["method"] != "vow":
@@ -455,7 +455,7 @@ class _AdaptiveForgeryExecution:
             padding_side="left",
         )
         watermark = semantic["watermark"]
-        server = VoprfServer(validated_seed(watermark))
+        server = VoprfServer(WATERMARK_SCHEMES.vow_seed(watermark))
 
         def server_interface(blinded_elements: list[Any]) -> Any:
             return server.batch_blind_evaluate(blinded_elements)

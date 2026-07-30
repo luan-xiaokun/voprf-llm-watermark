@@ -13,6 +13,7 @@ from watermark_suite.experiments.models import (
     AttemptIdentity,
     RunIdentity,
 )
+from watermark_suite.experiments.scheme_registry import WATERMARK_SCHEMES
 from watermark_suite.experiments.stages.adaptive_forgery import (
     AdaptiveForgeryStageAdapter,
 )
@@ -35,9 +36,14 @@ MODEL = {
     "checkpoint": "model",
     "revision": "commit",
     "location": "/models/model",
+    "verification": {"kind": "huggingface-cache", "commit": "commit"},
     "tokenizer_checkpoint": "model",
     "tokenizer_revision": "commit",
     "tokenizer_location": "/models/model",
+    "tokenizer_verification": {
+        "kind": "huggingface-cache",
+        "commit": "commit",
+    },
 }
 DATASET = {
     "kind": "c4",
@@ -65,6 +71,25 @@ def context(tmp_path: Path) -> ResolutionContext:
     )
 
 
+def test_watermark_scheme_registry_is_the_single_paired_interface(tmp_path):
+    assert WATERMARK_SCHEMES.methods == (
+        "lefthash",
+        "none",
+        "pdw",
+        "rdf",
+        "selfhash",
+        "upv",
+        "vow",
+    )
+
+    resolved = WATERMARK_SCHEMES.resolve(
+        {"method": "none", "enabled": False},
+        tmp_path,
+    )
+
+    assert resolved == {"method": "none", "enabled": False}
+
+
 def test_generation_contract_resolves_model_dataset_and_watermark(
     tmp_path, monkeypatch
 ):
@@ -75,12 +100,15 @@ def test_generation_contract_resolves_model_dataset_and_watermark(
         module, "resolve_dataset", lambda *args, **kwargs: DATASET
     )
     monkeypatch.setattr(
-        module, "resolve_watermark", lambda *args, **kwargs: WATERMARK
+        module.WATERMARK_SCHEMES,
+        "resolve",
+        lambda *args, **kwargs: WATERMARK,
     )
     settings = {
         "model": "main",
         "dataset": "c4",
         "num_samples": 2,
+        "repetitions": 1,
         "batch_size": 2,
         "seed": 42,
         "max_new_tokens": 10,
@@ -118,7 +146,9 @@ def test_adaptive_contract_excludes_irrelevant_delta_from_run_semantics(
         module, "resolve_dataset", lambda *args, **kwargs: DATASET
     )
     monkeypatch.setattr(
-        module, "resolve_watermark", lambda *args, **kwargs: WATERMARK
+        module.WATERMARK_SCHEMES,
+        "resolve",
+        lambda *args, **kwargs: WATERMARK,
     )
     settings = {
         "model": "main",
@@ -167,7 +197,7 @@ def test_detection_contract_derives_watermark_and_tokenizer_from_source():
     source = ArtifactRef(
         identity=ArtifactIdentity("artifact_source"),
         path=Path("/artifact"),
-        schema_revision="generated-text-v1",
+        schema_revision="generated-text-v2",
         run_identity=RunIdentity("run_source"),
         attempt_identity=AttemptIdentity("attempt_source"),
         manifest={
@@ -185,6 +215,10 @@ def test_detection_contract_derives_watermark_and_tokenizer_from_source():
         "tokenizer_checkpoint": "model",
         "tokenizer_revision": "commit",
         "tokenizer_location": "/models/model",
+        "tokenizer_verification": {
+            "kind": "huggingface-cache",
+            "commit": "commit",
+        },
     }
 
 
@@ -256,7 +290,7 @@ def test_perplexity_contract_uses_evaluator_model_tokenizer(
     source = ArtifactRef(
         identity=ArtifactIdentity("artifact_source"),
         path=Path("/artifact"),
-        schema_revision="generated-text-v1",
+        schema_revision="generated-text-v2",
         run_identity=RunIdentity("run_source"),
         attempt_identity=AttemptIdentity("attempt_source"),
         manifest={"semantic_settings": {"watermark": WATERMARK}},
@@ -281,7 +315,9 @@ def test_downstream_contract_pins_full_task_and_greedy_decoding(
     }
     monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
     monkeypatch.setattr(
-        module, "resolve_watermark", lambda *args, **kwargs: WATERMARK
+        module.WATERMARK_SCHEMES,
+        "resolve",
+        lambda *args, **kwargs: WATERMARK,
     )
     monkeypatch.setattr(
         module, "resolve_task_dataset", lambda task: task_dataset
@@ -323,7 +359,9 @@ def test_downstream_contract_rejects_wrong_shot_count(
 
     monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
     monkeypatch.setattr(
-        module, "resolve_watermark", lambda *args, **kwargs: WATERMARK
+        module.WATERMARK_SCHEMES,
+        "resolve",
+        lambda *args, **kwargs: WATERMARK,
     )
     monkeypatch.setattr(
         module,

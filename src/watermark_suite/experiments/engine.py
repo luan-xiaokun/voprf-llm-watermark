@@ -19,6 +19,7 @@ from .adapters import (
 from .errors import (
     ArtifactFinalizationError,
     ArtifactIntegrityError,
+    AttemptConflictError,
     CheckpointCorruptionError,
     DirtyImplementationError,
     StageExecutionError,
@@ -224,11 +225,16 @@ class ExperimentRuns:
         inputs: tuple[ArtifactRef, ...],
     ) -> tuple[RunIdentity, str]:
         document = {
-            "identity_schema": 1,
+            "identity_schema": 2,
             "kind": stage.kind,
             "adapter_revision": stage.adapter_revision,
             "artifact_schema_revision": definition.artifact_schema_revision,
             "semantic_settings": definition.semantic_settings,
+            "runtime_settings": {
+                key: definition.execution_settings[key]
+                for key in ("device", "dtype")
+                if key in definition.execution_settings
+            },
             "source_artifacts": [item.identity.value for item in inputs],
             "code_revision": plan.code_revision,
         }
@@ -405,6 +411,28 @@ class ExperimentRuns:
             instance_name=stage.instance_name,
             run_identity=run,
         )
+        with self.workspace.run_lease(run):
+            return self._execute_stage_with_run_lease(
+                plan=plan,
+                stage=stage,
+                definition=definition,
+                inputs=inputs,
+                force_new=force_new,
+                adapter=adapter,
+                run=run,
+            )
+
+    def _execute_stage_with_run_lease(
+        self,
+        *,
+        plan: ResolvedExperimentPlan,
+        stage: PreparedStage,
+        definition: ResolvedStageDefinition,
+        inputs: tuple[ArtifactRef, ...],
+        force_new: bool,
+        adapter: StageAdapter,
+        run: RunIdentity,
+    ) -> tuple[ArtifactRef, str, str]:
         if not force_new:
             canonical = self.workspace.canonical_artifact(run)
             if canonical is not None:
@@ -419,6 +447,30 @@ class ExperimentRuns:
         attempt, resumed = self._select_attempt(
             run, stage, force_new=force_new
         )
+        with self.workspace.attempt_lease(attempt):
+            return self._execute_attempt(
+                plan=plan,
+                stage=stage,
+                definition=definition,
+                inputs=inputs,
+                run=run,
+                attempt=attempt,
+                resumed=resumed,
+                adapter=adapter,
+            )
+
+    def _execute_attempt(
+        self,
+        *,
+        plan: ResolvedExperimentPlan,
+        stage: PreparedStage,
+        definition: ResolvedStageDefinition,
+        inputs: tuple[ArtifactRef, ...],
+        run: RunIdentity,
+        attempt: AttemptIdentity,
+        resumed: bool,
+        adapter: StageAdapter,
+    ) -> tuple[ArtifactRef, str, str]:
         execution_context = StageExecutionContext(
             repository=self.repository,
             workspace=self.workspace.root,
@@ -522,6 +574,7 @@ class ExperimentRuns:
         resolved = self._load_plan(plan)
         self.workspace.register_plan(resolved)
         self._check_implementation(resolved)
+        self.workspace.reset_plan_stage_states(resolved.plan_digest)
         force_new = set(new_attempts)
         unknown = force_new - {stage.instance_name for stage in resolved.stages}
         if unknown:
@@ -533,6 +586,7 @@ class ExperimentRuns:
         artifacts: dict[str, ArtifactRef] = {}
         failed: set[str] = set()
         blocked: set[str] = set()
+        skipped: set[str] = set()
         pending = list(resolved.stages)
         reused: list[str] = []
         resumed: list[str] = []
@@ -544,6 +598,11 @@ class ExperimentRuns:
             for stage in tuple(pending):
                 if stage.input_instance in failed or stage.input_instance in blocked:
                     blocked.add(stage.instance_name)
+                    self.workspace.set_plan_stage_state(
+                        resolved.plan_digest,
+                        stage.instance_name,
+                        "blocked",
+                    )
                     pending.remove(stage)
             if not pending:
                 break
@@ -591,14 +650,39 @@ class ExperimentRuns:
                     else:
                         created.append(attempt)
                 current_resource = stage.resource_key
-            except ArtifactIntegrityError:
+            except (ArtifactIntegrityError, AttemptConflictError):
                 raise
             except Exception:
                 failed.add(stage.instance_name)
                 if hasattr(self.runtime, "release"):
                     self.runtime.release()
                 if not keep_going:
-                    blocked.update(item.instance_name for item in pending)
+                    dependency_failures = failed | blocked
+                    changed = True
+                    while changed:
+                        changed = False
+                        for item in pending:
+                            if (
+                                item.instance_name not in dependency_failures
+                                and item.input_instance in dependency_failures
+                            ):
+                                dependency_failures.add(item.instance_name)
+                                changed = True
+                    for item in pending:
+                        state = (
+                            "blocked"
+                            if item.instance_name in dependency_failures
+                            else "skipped"
+                        )
+                        if state == "blocked":
+                            blocked.add(item.instance_name)
+                        else:
+                            skipped.add(item.instance_name)
+                        self.workspace.set_plan_stage_state(
+                            resolved.plan_digest,
+                            item.instance_name,
+                            state,
+                        )
                     break
 
         return ExecutionReport(
@@ -609,10 +693,41 @@ class ExperimentRuns:
             finalized_artifacts=tuple(finalized),
             failed_stages=tuple(sorted(failed)),
             blocked_stages=tuple(sorted(blocked)),
+            skipped_stages=tuple(sorted(skipped)),
         )
 
     def status(
         self, plan: str | Path | ResolvedExperimentPlan
     ) -> PlanStatus:
         resolved = self._load_plan(plan)
-        return self.workspace.status(resolved.plan_digest)
+        status = self.workspace.status(resolved.plan_digest)
+        stage_states = self.workspace.plan_stage_states(
+            resolved.plan_digest
+        )
+        by_instance: dict[str, list[JsonObject]] = {}
+        for run in status.runs:
+            by_instance.setdefault(run["instance_name"], []).append(run)
+        runs: list[JsonObject] = []
+        for stage in resolved.stages:
+            bound = by_instance.get(stage.instance_name)
+            if bound:
+                runs.extend(bound)
+                continue
+            runs.append(
+                {
+                    "instance_name": stage.instance_name,
+                    "stage_name": stage.stage_name,
+                    "stage_kind": stage.kind,
+                    "run_identity": None,
+                    "canonical_artifact_identity": None,
+                    "state": stage_states.get(
+                        stage.instance_name, "pending"
+                    ),
+                }
+            )
+        return PlanStatus(
+            plan_digest=status.plan_digest,
+            runs=tuple(runs),
+            attempts=status.attempts,
+            artifacts=status.artifacts,
+        )

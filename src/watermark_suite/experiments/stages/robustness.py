@@ -1,0 +1,367 @@
+from __future__ import annotations
+
+import random
+import re
+import statistics
+from typing import Any
+
+from ..adapters import (
+    ResolutionContext,
+    ResolvedStageDefinition,
+    StageExecutionContext,
+)
+from ..errors import PlanValidationError
+from ..identity import derived_seed, identity_for
+from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
+from ..openai_paraphrase import OpenAIParaphraser
+from .common import (
+    artifact_records,
+    batches,
+    require,
+    validate_execution_settings,
+)
+
+
+_OPENAI_PARAPHRASE_FIELDS = {
+    "method",
+    "model",
+    "max_output_tokens",
+    "temperature",
+    "reasoning_effort",
+    "instruction",
+}
+_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+
+
+def _resolve_transformation(
+    value: Any,
+    context: ResolutionContext,
+) -> JsonObject:
+    if not isinstance(value, dict):
+        raise PlanValidationError("transformation must be a mapping")
+    method = value.get("method")
+    if method == "word-deletion":
+        unknown = sorted(set(value) - {"method", "rate"})
+        if unknown:
+            raise PlanValidationError(
+                "word-deletion has unknown settings: " + ", ".join(unknown)
+            )
+        rate = value.get("rate")
+        if not isinstance(rate, (int, float)) or not 0 < rate < 1:
+            raise PlanValidationError(
+                "word-deletion rate must be between zero and one"
+            )
+        return dict(value)
+    if method == "openai-paraphrase":
+        unknown = sorted(set(value) - _OPENAI_PARAPHRASE_FIELDS)
+        missing = sorted(_OPENAI_PARAPHRASE_FIELDS - set(value))
+        if unknown or missing:
+            messages = []
+            if unknown:
+                messages.append("unknown: " + ", ".join(unknown))
+            if missing:
+                messages.append("missing: " + ", ".join(missing))
+            raise PlanValidationError(
+                "openai-paraphrase settings are invalid ("
+                + "; ".join(messages)
+                + ")"
+            )
+        if (
+            not isinstance(value["model"], str)
+            or not value["model"].strip()
+        ):
+            raise PlanValidationError(
+                "openai-paraphrase model must be non-empty"
+            )
+        if (
+            not isinstance(value["max_output_tokens"], int)
+            or isinstance(value["max_output_tokens"], bool)
+            or value["max_output_tokens"] <= 0
+        ):
+            raise PlanValidationError(
+                "openai-paraphrase max_output_tokens must be positive"
+            )
+        temperature = value["temperature"]
+        if temperature is not None and (
+            not isinstance(temperature, (int, float))
+            or isinstance(temperature, bool)
+            or not 0 <= temperature <= 2
+        ):
+            raise PlanValidationError(
+                "openai-paraphrase temperature must be between zero "
+                "and two or null"
+            )
+        reasoning_effort = value["reasoning_effort"]
+        if (
+            reasoning_effort is not None
+            and reasoning_effort not in _REASONING_EFFORTS
+        ):
+            raise PlanValidationError(
+                "openai-paraphrase reasoning_effort must be one of "
+                + ", ".join(sorted(_REASONING_EFFORTS))
+                + " or null"
+            )
+        if not isinstance(value["instruction"], str) or not value[
+            "instruction"
+        ].strip():
+            raise PlanValidationError(
+                "openai-paraphrase instruction must be non-empty"
+            )
+        return dict(value)
+    raise PlanValidationError(
+        "transformation.method must be word-deletion or "
+        "openai-paraphrase"
+    )
+
+
+class RobustnessStageAdapter:
+    kind = "robustness"
+    revision = "robustness-v2"
+    accepted_settings = {
+        "transformation",
+        "batch_size",
+        "target_field",
+        "seed",
+        "device",
+        "dtype",
+    }
+    _required = accepted_settings
+
+    def resolve(
+        self,
+        settings: JsonObject,
+        context: ResolutionContext,
+    ) -> ResolvedStageDefinition:
+        require(settings, self._required, kind=self.kind)
+        validate_execution_settings(settings)
+        if not isinstance(settings["batch_size"], int) or settings[
+            "batch_size"
+        ] <= 0:
+            raise PlanValidationError("batch_size must be positive")
+        if not isinstance(settings["seed"], int):
+            raise PlanValidationError("seed must be an integer")
+        if (
+            not isinstance(settings["target_field"], str)
+            or not settings["target_field"]
+        ):
+            raise PlanValidationError("target_field must be non-empty")
+        transformation = _resolve_transformation(
+            settings["transformation"],
+            context,
+        )
+        resource_key = "cpu:robustness"
+        if transformation["method"] == "openai-paraphrase":
+            resource_key = f"remote:openai:{transformation['model']}"
+        return ResolvedStageDefinition(
+            settings={
+                **settings,
+                "transformation": transformation,
+            },
+            semantic_settings={
+                "transformation": transformation,
+                "batch_size": settings["batch_size"],
+                "target_field": settings["target_field"],
+                "seed": settings["seed"],
+            },
+            execution_settings={
+                "device": settings["device"],
+                "dtype": settings["dtype"],
+            },
+            artifact_schema_revision="robustness-text-v2",
+            resource_key=resource_key,
+        )
+
+    def bind_inputs(
+        self,
+        definition: ResolvedStageDefinition,
+        inputs: tuple[ArtifactRef, ...],
+    ) -> ResolvedStageDefinition:
+        if len(inputs) != 1:
+            raise PlanValidationError(
+                "robustness requires exactly one source Artifact"
+            )
+        source_semantic = inputs[0].manifest.get("semantic_settings", {})
+        model = source_semantic.get("model")
+        watermark = source_semantic.get("watermark")
+        if not isinstance(model, dict) or not isinstance(watermark, dict):
+            raise PlanValidationError(
+                "source Artifact does not declare model/watermark provenance"
+            )
+        return ResolvedStageDefinition(
+            settings=dict(definition.settings),
+            semantic_settings={
+                **definition.semantic_settings,
+                "model": model,
+                "watermark": watermark,
+            },
+            execution_settings=definition.execution_settings,
+            artifact_schema_revision=definition.artifact_schema_revision,
+            resource_key=definition.resource_key,
+        )
+
+    def prepare(
+        self,
+        context: StageExecutionContext,
+    ) -> "_RobustnessExecution":
+        return _RobustnessExecution(context)
+
+
+class _RobustnessExecution:
+    def __init__(self, context: StageExecutionContext) -> None:
+        self.context = context
+        self.records = artifact_records(context.inputs[0])
+        transformation = context.semantic_settings["transformation"]
+        self.paraphraser = (
+            OpenAIParaphraser()
+            if transformation["method"] == "openai-paraphrase"
+            else None
+        )
+
+    def work_items(self) -> list[WorkItem]:
+        result = []
+        for ordinal, batch in enumerate(
+            batches(
+                self.records,
+                self.context.semantic_settings["batch_size"],
+            )
+        ):
+            sample_ids = tuple(record["sample_id"] for record in batch)
+            result.append(
+                WorkItem(
+                    identity=identity_for(
+                        {"ordinal": ordinal, "sample_ids": sample_ids},
+                        prefix="batch",
+                    ),
+                    ordinal=ordinal,
+                    sample_identities=sample_ids,
+                    payload=batch,
+                )
+            )
+        return result
+
+    @staticmethod
+    def _delete_words(text: str, rate: float, seed: int) -> str:
+        pieces = re.findall(r"\S+|\s+", text)
+        word_indices = [
+            index for index, piece in enumerate(pieces) if not piece.isspace()
+        ]
+        if len(word_indices) <= 1:
+            return text
+        rng = random.Random(seed)
+        deleted = {
+            index for index in word_indices if rng.random() < rate
+        }
+        if len(deleted) == len(word_indices):
+            deleted.remove(word_indices[0])
+        transformed = "".join(
+            piece for index, piece in enumerate(pieces) if index not in deleted
+        )
+        return re.sub(r"\s+", " ", transformed).strip()
+
+    def execute(self, item: WorkItem) -> WorkResult:
+        semantic = self.context.semantic_settings
+        transformation = semantic["transformation"]
+        target_field = semantic["target_field"]
+        missing = [
+            record["sample_id"]
+            for record in item.payload
+            if target_field not in record
+        ]
+        if missing:
+            raise PlanValidationError(
+                f"source records lack target_field={target_field!r}: "
+                f"{missing[:5]}"
+            )
+        texts = [str(record[target_field]) for record in item.payload]
+        if transformation["method"] == "word-deletion":
+            transformed = [
+                self._delete_words(
+                    text,
+                    transformation["rate"],
+                    derived_seed(semantic["seed"], record["sample_id"]),
+                )
+                for record, text in zip(item.payload, texts)
+            ]
+            provenance = [{} for _ in transformed]
+        else:
+            paraphrases = self.paraphraser.paraphrase_many(
+                texts,
+                concurrency=semantic["batch_size"],
+                model=transformation["model"],
+                instruction=transformation["instruction"],
+                max_output_tokens=transformation["max_output_tokens"],
+                temperature=transformation["temperature"],
+                reasoning_effort=transformation["reasoning_effort"],
+            )
+            transformed = [result.text for result in paraphrases]
+            provenance = [result.provenance for result in paraphrases]
+        records = []
+        for source, original, changed, remote_provenance in zip(
+            item.payload,
+            texts,
+            transformed,
+            provenance,
+        ):
+            records.append(
+                {
+                    **source,
+                    "sample_id": source["sample_id"],
+                    "source_artifact": self.context.inputs[0].identity.value,
+                    "original_text": original,
+                    "transformed_text": changed,
+                    "robustness": {
+                        "method": transformation["method"],
+                        "original_character_num": len(original),
+                        "transformed_character_num": len(changed),
+                        "character_ratio": (
+                            len(changed) / len(original) if original else 0.0
+                        ),
+                        **remote_provenance,
+                    },
+                }
+            )
+        return WorkResult(records=tuple(records))
+
+    def summarize(self, records: list[JsonObject]) -> JsonObject:
+        ratios = [
+            record["robustness"]["character_ratio"] for record in records
+        ]
+        summary = {
+            "sample_num": len(records),
+            "transformation": self.context.semantic_settings[
+                "transformation"
+            ],
+            "mean_character_ratio": (
+                statistics.mean(ratios) if ratios else 0.0
+            ),
+        }
+        api_records = [
+            record["robustness"]
+            for record in records
+            if record["robustness"].get("provider") == "openai"
+        ]
+        if api_records:
+            usage_fields = (
+                "input_tokens",
+                "cached_input_tokens",
+                "cache_write_input_tokens",
+                "output_tokens",
+                "reasoning_output_tokens",
+                "total_tokens",
+            )
+            summary["openai"] = {
+                "request_num": len(api_records),
+                "mean_latency_seconds": statistics.mean(
+                    record["latency_seconds"] for record in api_records
+                ),
+                "usage": {
+                    field: sum(
+                        record["usage"][field] for record in api_records
+                    )
+                    for field in usage_fields
+                },
+            }
+        return summary
+
+    def close(self) -> None:
+        pass

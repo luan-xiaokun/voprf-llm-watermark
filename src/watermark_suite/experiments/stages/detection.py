@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import math
 import statistics
+import sys
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -17,8 +18,8 @@ from ..adapters import (
 from ..errors import PlanValidationError
 from ..identity import identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
-from .common import batches, require
-from .watermarks import detector_for
+from ..scheme_registry import WATERMARK_SCHEMES
+from .common import artifact_records, batches, require
 
 
 def _json_value(value: Any) -> Any:
@@ -35,10 +36,125 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def _artifact_records(artifact: ArtifactRef) -> list[JsonObject]:
-    from ..engine import _read_jsonlines
+def _distribution(values: list[float | int]) -> JsonObject:
+    finite = [float(value) for value in values if math.isfinite(value)]
+    if not finite:
+        return {
+            "count": 0,
+            "mean": None,
+            "median": None,
+            "min": None,
+            "max": None,
+            "p05": None,
+            "p25": None,
+            "p75": None,
+            "p95": None,
+        }
+    ordered = sorted(finite)
 
-    return list(_read_jsonlines(artifact.path / "records.jsonl"))
+    def percentile(fraction: float) -> float:
+        index = max(
+            0,
+            min(
+                len(ordered) - 1,
+                math.ceil(fraction * len(ordered)) - 1,
+            ),
+        )
+        return ordered[index]
+
+    return {
+        "count": len(ordered),
+        "mean": statistics.mean(ordered),
+        "median": statistics.median(ordered),
+        "min": ordered[0],
+        "max": ordered[-1],
+        "p05": percentile(0.05),
+        "p25": percentile(0.25),
+        "p75": percentile(0.75),
+        "p95": percentile(0.95),
+    }
+
+
+def adaptive_forgery_curve(
+    records: list[JsonObject],
+    significance_levels: list[float],
+) -> list[JsonObject]:
+    """Aggregate axes-ready query cost and attack success by token length."""
+
+    by_milestone: dict[int, list[JsonObject]] = {}
+    for record in records:
+        forgery = record.get("adaptive_forgery")
+        detection = record.get("detection", {})
+        if not isinstance(forgery, dict):
+            continue
+        trace = forgery.get("trace")
+        if not isinstance(trace, list):
+            continue
+        for milestone, p_value in zip(
+            detection.get("milestones") or [],
+            detection.get("step_p_values") or [],
+        ):
+            token_num = int(milestone)
+            prefix = [
+                step
+                for step in trace
+                if int(step.get("position", -1)) < token_num
+            ]
+            query_count = (
+                int(prefix[-1]["cumulative_oracle_query_count"])
+                if prefix
+                else 0
+            )
+            scored = [
+                step
+                for step in prefix
+                if step.get("selected_green") is not None
+            ]
+            green_count = sum(
+                step.get("selected_green") is True for step in scored
+            )
+            by_milestone.setdefault(token_num, []).append(
+                {
+                    "query_count": query_count,
+                    "green_count": green_count,
+                    "green_ratio": (
+                        green_count / len(scored) if scored else 0.0
+                    ),
+                    "p_value": float(p_value),
+                }
+            )
+    return [
+        {
+            "token_num": token_num,
+            "eligible_sample_num": len(values),
+            "mean_oracle_query_count": statistics.mean(
+                value["query_count"] for value in values
+            ),
+            "median_oracle_query_count": statistics.median(
+                value["query_count"] for value in values
+            ),
+            "mean_queries_per_token": statistics.mean(
+                value["query_count"] / token_num for value in values
+            ),
+            "mean_selected_green_token_count": statistics.mean(
+                value["green_count"] for value in values
+            ),
+            "mean_selected_green_ratio": statistics.mean(
+                value["green_ratio"] for value in values
+            ),
+            "median_p_value": statistics.median(
+                value["p_value"] for value in values
+            ),
+            "attack_success_rate": {
+                f"{level:.0e}": (
+                    sum(value["p_value"] < level for value in values)
+                    / len(values)
+                )
+                for level in significance_levels
+            },
+        }
+        for token_num, values in sorted(by_milestone.items())
+    ]
 
 
 class DetectionStageAdapter:
@@ -121,6 +237,7 @@ class DetectionStageAdapter:
                     "tokenizer_checkpoint",
                     "tokenizer_revision",
                     "tokenizer_location",
+                    "tokenizer_verification",
                 )
             },
         }
@@ -134,10 +251,9 @@ class DetectionStageAdapter:
             execution_settings=definition.execution_settings,
             artifact_schema_revision=definition.artifact_schema_revision,
             resource_key=(
-                "detector:"
+                "tokenizer:"
                 f"{semantic['tokenizer']['tokenizer_checkpoint']}@"
-                f"{semantic['tokenizer']['tokenizer_revision']}:"
-                f"{watermark['method']}"
+                f"{semantic['tokenizer']['tokenizer_revision']}"
             ),
         )
 
@@ -161,16 +277,19 @@ class _DetectionExecution:
             "location": context.semantic_settings["tokenizer"][
                 "tokenizer_location"
             ],
+            "verification": context.semantic_settings["tokenizer"][
+                "tokenizer_verification"
+            ],
         }
         self.tokenizer = context.runtime.tokenizer(
             tokenizer_model, padding_side="left"
         )
-        self.detector, self.detector_kwargs = detector_for(
+        self.detector, self.detector_kwargs = WATERMARK_SCHEMES.detector(
             context.semantic_settings["watermark"],
             self.tokenizer,
             device=context.execution_settings["device"],
         )
-        self.records = _artifact_records(context.inputs[0])
+        self.records = artifact_records(context.inputs[0])
 
     def work_items(self) -> list[WorkItem]:
         result = []
@@ -274,6 +393,8 @@ class _DetectionExecution:
                         "green_ratio"
                     )
                 record["sample_metrics"] = metrics
+            if "adaptive_forgery" in source:
+                record["adaptive_forgery"] = source["adaptive_forgery"]
             records.append(record)
         return WorkResult(records=tuple(records))
 
@@ -304,6 +425,13 @@ class _DetectionExecution:
             "watermark": self.context.semantic_settings["watermark"],
             "p_value_median": (
                 statistics.median(p_values) if p_values else None
+            ),
+            "p_value_distribution": _distribution(p_values),
+            "negative_log10_p_value_distribution": _distribution(
+                [
+                    -math.log10(max(value, sys.float_info.min))
+                    for value in p_values
+                ]
             ),
             "detection_rate": rates,
             rate_name: rates,
@@ -337,6 +465,14 @@ class _DetectionExecution:
                 for token_num, values in sorted(milestone_values.items())
             ]
         if records and all(
+            "adaptive_forgery" in record for record in records
+        ):
+            summary["attack_success_rate"] = rates
+            summary["adaptive_forgery_curve"] = adaptive_forgery_curve(
+                records,
+                levels,
+            )
+        if records and all(
             "effective_token_num" in record["detection"]
             for record in records
         ):
@@ -353,6 +489,18 @@ class _DetectionExecution:
                     "effective_token_num": effective,
                     "green_token_num": green,
                     "green_ratio": green / effective if effective else 0.0,
+                    "green_token_count_distribution": _distribution(
+                        [
+                            int(record["detection"]["green_token_num"])
+                            for record in records
+                        ]
+                    ),
+                    "effective_token_count_distribution": _distribution(
+                        [
+                            int(record["detection"]["effective_token_num"])
+                            for record in records
+                        ]
+                    ),
                 }
             )
             if all("sample_metrics" in record for record in records):
@@ -363,6 +511,12 @@ class _DetectionExecution:
                 summary["oracle_query_count"] = queries
                 summary["query_overhead_vs_honest_audit"] = (
                     queries / effective if effective else 0.0
+                )
+                summary["oracle_query_count_distribution"] = _distribution(
+                    [
+                        record["sample_metrics"]["oracle_query_count"]
+                        for record in records
+                    ]
                 )
         return summary
 

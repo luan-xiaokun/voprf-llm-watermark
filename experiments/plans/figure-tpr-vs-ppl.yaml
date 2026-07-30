@@ -19,6 +19,7 @@ datasets:
 defaults:
   device: cuda
   dtype: bfloat16
+  repetitions: 1
 
 stages:
   # This sweep deliberately uses the same generation semantics as the

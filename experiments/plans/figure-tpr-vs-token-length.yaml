@@ -17,6 +17,7 @@ datasets:
 defaults:
   device: cuda
   dtype: bfloat16
+  repetitions: 1
 
 stages:
   generate_vow_default:

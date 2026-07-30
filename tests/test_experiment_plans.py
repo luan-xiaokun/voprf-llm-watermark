@@ -14,11 +14,19 @@ def _resolve_checkpoint(
     checkpoint: str,
     revision: str | None,
     repository: Path,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, dict]:
     del repository
     selected_revision = revision or "test-model-revision"
     location = f"/models/{checkpoint.replace('/', '--')}"
-    return checkpoint, selected_revision, location
+    return (
+        checkpoint,
+        selected_revision,
+        location,
+        {
+            "kind": "huggingface-cache",
+            "commit": selected_revision,
+        },
+    )
 
 
 def _resolve_task_dataset(task: str) -> dict:
@@ -86,6 +94,119 @@ def test_tpr_token_length_plan_contract(monkeypatch):
     assert detections["detect_rdf"].semantic_settings[
         "significance_levels"
     ] == [0.01]
+
+
+def test_adaptive_forgery_plan_has_1000_samples_and_length_curve(
+    monkeypatch,
+):
+    plan = resolve("adaptive-forgery-qwen25-7b.yaml", monkeypatch)
+
+    forge = next(
+        stage for stage in plan.stages
+        if stage.kind == "adaptive-forgery"
+    )
+    detection = next(
+        stage for stage in plan.stages if stage.kind == "detection"
+    )
+
+    assert forge.semantic_settings["sample_manifest"]["count"] == 1000
+    assert forge.semantic_settings["watermark"]["gamma"] == 0.5
+    assert forge.semantic_settings["max_candidates"] == 8
+    assert forge.semantic_settings["trace_level"] == "compact"
+    assert detection.semantic_settings["step_size"] == 10
+    assert 0.00001 in detection.semantic_settings["significance_levels"]
+
+
+def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
+    import watermark_suite.experiments.stages.common as common
+
+    monkeypatch.setattr(
+        common,
+        "_load_dataset_records",
+        lambda spec, limit=None: [
+            {"question": f"question {index}"}
+            for index in range(limit or 500)
+        ],
+    )
+    plan = resolve(
+        "robustness-qwen25-7b-instruct.yaml",
+        monkeypatch,
+    )
+
+    generations = [
+        stage for stage in plan.stages if stage.kind == "generation"
+    ]
+    assert all(
+        stage.semantic_settings["sample_manifest"]["count"] == 1000
+        for stage in generations
+    )
+    assert len(plan.stages) == 77
+    assert sum(stage.kind == "robustness" for stage in plan.stages) == 21
+    assert sum(stage.kind == "detection" for stage in plan.stages) == 28
+    assert sum(
+        stage.kind == "text-evaluation" for stage in plan.stages
+    ) == 21
+    assert {
+        stage.semantic_settings["transformation"]["method"]
+        for stage in plan.stages
+        if stage.kind == "robustness"
+    } == {"word-deletion", "openai-paraphrase"}
+    paraphrases = [
+        stage.semantic_settings["transformation"]
+        for stage in plan.stages
+        if (
+            stage.kind == "robustness"
+            and stage.semantic_settings["transformation"]["method"]
+            == "openai-paraphrase"
+        )
+    ]
+    assert {value["model"] for value in paraphrases} == {
+        "gpt-3.5-turbo-0125",
+        "gpt-5.6-sol",
+    }
+    assert {
+        value["model"]: value["reasoning_effort"]
+        for value in paraphrases
+    } == {
+        "gpt-3.5-turbo-0125": None,
+        "gpt-5.6-sol": "low",
+    }
+    assert {value["temperature"] for value in paraphrases} == {0.7}
+    clean_detection = [
+        stage
+        for stage in plan.stages
+        if (
+            stage.kind == "detection"
+            and stage.settings["target_field"] == "generated_text"
+        )
+    ]
+    assert len(clean_detection) == 7
+
+
+def test_diversity_plan_repeats_each_prompt_and_uses_unified_evaluation(
+    monkeypatch,
+):
+    plan = resolve("diversity-qwen25-7b.yaml", monkeypatch)
+
+    generations = [
+        stage for stage in plan.stages if stage.kind == "generation"
+    ]
+    evaluations = [
+        stage for stage in plan.stages
+        if stage.kind == "text-evaluation"
+    ]
+
+    assert len(generations) == 7
+    assert len(evaluations) == 7
+    assert all(
+        stage.semantic_settings["repetitions"] == 50
+        for stage in generations
+    )
+    assert all(
+        stage.semantic_settings["metric_set"] == ["diversity"]
+        and stage.semantic_settings["group_field"] == "source_sample_id"
+        for stage in evaluations
+    )
 
 
 def test_tpr_ppl_plan_reuses_shared_generation_semantics(monkeypatch):

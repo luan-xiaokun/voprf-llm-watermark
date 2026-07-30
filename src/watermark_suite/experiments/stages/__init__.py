@@ -3,6 +3,8 @@ from .detection import DetectionStageAdapter
 from .downstream import DownstreamStageAdapter
 from .generation import GenerationStageAdapter
 from .perplexity import PerplexityStageAdapter
+from .robustness import RobustnessStageAdapter
+from .text_evaluation import TextEvaluationStageAdapter
 
 
 def default_stage_adapters():
@@ -12,6 +14,8 @@ def default_stage_adapters():
         DetectionStageAdapter(),
         PerplexityStageAdapter(),
         DownstreamStageAdapter(),
+        RobustnessStageAdapter(),
+        TextEvaluationStageAdapter(),
     )
     return {adapter.kind: adapter for adapter in adapters}
 
@@ -22,5 +26,7 @@ __all__ = [
     "DownstreamStageAdapter",
     "GenerationStageAdapter",
     "PerplexityStageAdapter",
+    "RobustnessStageAdapter",
+    "TextEvaluationStageAdapter",
     "default_stage_adapters",
 ]

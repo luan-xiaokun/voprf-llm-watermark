@@ -1,0 +1,92 @@
+version: 1
+name: diversity-qwen25-7b
+
+models:
+  qwen-generation:
+    checkpoint: Qwen/Qwen2.5-7B
+  diversity-encoder:
+    checkpoint: sentence-transformers/all-mpnet-base-v2
+
+datasets:
+  c4-diversity:
+    kind: c4
+    format: jsonl
+    path: data/c4_realnewslike_subset_1000.jsonl
+    split: train
+    prompt_field: prompt_text
+    sample_id_field: original_index
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+
+stages:
+  generate_repeated:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-diversity
+    num_samples: 50
+    repetitions: 50
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 200
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 1.0
+    suppress_eos: false
+    stop_strings: null
+    sweep:
+      watermark:
+        - method: none
+          enabled: false
+        - method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: lefthash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - method: selfhash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - method: rdf
+          enabled: true
+          length: 256
+          seed: 42
+          watermark_device: cpu
+          n_runs: 100
+        - method: pdw
+          enabled: true
+          sk_path: data/pdw/sk
+          pk_path: data/pdw/pk
+          params_path: data/pdw/params
+          signature_segment_length: 16
+          bit_size: 2
+          message_length: 8
+          max_planted_errors: 2
+          seed: 0
+        - method: upv
+          enabled: true
+          detector_dir: experiments/upv_baseline/model
+          window_size: 4
+          gamma: 0.5
+          delta: 2.0
+          bit_number: 18
+          layers: 5
+          beam_size: 0
+
+  evaluate_diversity:
+    kind: text-evaluation
+    input: generate_repeated
+    metric_set: [diversity]
+    embedding_model: diversity-encoder
+    batch_size: 128
+    reference_field: null
+    target_field: generated_text
+    group_field: source_sample_id

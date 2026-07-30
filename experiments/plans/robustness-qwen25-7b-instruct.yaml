@@ -1,0 +1,218 @@
+version: 1
+name: robustness-qwen25-7b-instruct
+
+models:
+  qwen-instruct:
+    checkpoint: Qwen/Qwen2.5-7B-Instruct
+  similarity-encoder:
+    checkpoint: sentence-transformers/all-mpnet-base-v2
+
+datasets:
+  eli5-robustness:
+    kind: eli5
+    format: huggingface
+    path: data/eli5
+    split: train
+    prompt_field: question
+    sample_id_field: null
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+  repetitions: 1
+
+stages:
+  generate_robustness:
+    kind: generation
+    model: qwen-instruct
+    dataset: eli5-robustness
+    num_samples: 1000
+    batch_size: 8
+    seed: 42
+    max_new_tokens: 600
+    do_sample: true
+    top_p: null
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    sweep:
+      watermark:
+        - method: vow
+          enabled: true
+          window_size: 1
+          gamma: 0.5
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: vow
+          enabled: true
+          window_size: 2
+          gamma: 0.5
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: lefthash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - method: selfhash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - method: upv
+          enabled: true
+          detector_dir: experiments/upv_baseline/model
+          window_size: 4
+          gamma: 0.5
+          delta: 2.0
+          bit_number: 18
+          layers: 5
+          beam_size: 0
+
+  detect_clean_robustness:
+    kind: detection
+    input: generate_robustness
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001, 0.01]
+    use_local: true
+    step_size: 20
+
+  transform_robustness:
+    kind: robustness
+    input: generate_robustness
+    batch_size: 8
+    target_field: generated_text
+    seed: 42
+    sweep:
+      transformation:
+        - method: word-deletion
+          rate: 0.1
+        - method: openai-paraphrase
+          model: gpt-3.5-turbo-0125
+          max_output_tokens: 600
+          temperature: 0.7
+          reasoning_effort: null
+          instruction: >-
+            Rewrite the supplied text in different wording while preserving
+            its information and approximate length. Return only the rewritten
+            text.
+        - method: openai-paraphrase
+          model: gpt-5.6-sol
+          max_output_tokens: 600
+          temperature: 0.7
+          reasoning_effort: low
+          instruction: >-
+            Rewrite the supplied text in different wording while preserving
+            its information and approximate length. Return only the rewritten
+            text.
+
+  detect_robustness:
+    kind: detection
+    input: transform_robustness
+    batch_size: 64
+    target_field: transformed_text
+    token_num: null
+    significance_levels: [0.00001, 0.01]
+    use_local: true
+    step_size: 20
+
+  evaluate_robustness_similarity:
+    kind: text-evaluation
+    input: transform_robustness
+    metric_set: [similarity]
+    embedding_model: similarity-encoder
+    batch_size: 128
+    reference_field: original_text
+    target_field: transformed_text
+    group_field: null
+
+  generate_rdf_robustness:
+    kind: generation
+    model: qwen-instruct
+    dataset: eli5-robustness
+    num_samples: 1000
+    batch_size: 8
+    seed: 42
+    max_new_tokens: 600
+    do_sample: true
+    top_p: null
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: rdf
+      enabled: true
+      length: 256
+      seed: 42
+      watermark_device: cpu
+      n_runs: 100
+
+  detect_clean_rdf_robustness:
+    kind: detection
+    input: generate_rdf_robustness
+    batch_size: 16
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: 50
+
+  transform_rdf_robustness:
+    kind: robustness
+    input: generate_rdf_robustness
+    batch_size: 8
+    target_field: generated_text
+    seed: 42
+    sweep:
+      transformation:
+        - method: word-deletion
+          rate: 0.1
+        - method: openai-paraphrase
+          model: gpt-3.5-turbo-0125
+          max_output_tokens: 600
+          temperature: 0.7
+          reasoning_effort: null
+          instruction: >-
+            Rewrite the supplied text in different wording while preserving
+            its information and approximate length. Return only the rewritten
+            text.
+        - method: openai-paraphrase
+          model: gpt-5.6-sol
+          max_output_tokens: 600
+          temperature: 0.7
+          reasoning_effort: low
+          instruction: >-
+            Rewrite the supplied text in different wording while preserving
+            its information and approximate length. Return only the rewritten
+            text.
+
+  detect_rdf_robustness:
+    kind: detection
+    input: transform_rdf_robustness
+    batch_size: 16
+    target_field: transformed_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: 50
+
+  evaluate_rdf_robustness_similarity:
+    kind: text-evaluation
+    input: transform_rdf_robustness
+    metric_set: [similarity]
+    embedding_model: similarity-encoder
+    batch_size: 128
+    reference_field: original_text
+    target_field: transformed_text
+    group_field: null

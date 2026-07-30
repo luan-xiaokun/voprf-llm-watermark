@@ -161,14 +161,16 @@ def _print_status(value: dict[str, Any]) -> None:
     )
     for run in value["runs"]:
         canonical = run.get("canonical_artifact_identity") or "-"
+        run_identity = run.get("run_identity") or "-"
+        state = run.get("state", "pending")
         print(
-            f"  {run['instance_name']}: {run['run_identity']} "
+            f"  {run['instance_name']}: {state} run={run_identity} "
             f"canonical={canonical}"
         )
         attempts = [
             attempt
             for attempt in value["attempts"]
-            if attempt["run_identity"] == run["run_identity"]
+            if attempt["run_identity"] == run.get("run_identity")
         ]
         for attempt in attempts:
             print(

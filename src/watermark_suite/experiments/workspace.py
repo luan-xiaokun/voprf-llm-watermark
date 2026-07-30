@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
 import sqlite3
@@ -36,12 +38,14 @@ class ExperimentWorkspace:
         self.attempts_dir = self.root / "attempts"
         self.plans_dir = self.root / "resolved-plans"
         self.logs_dir = self.root / "logs"
+        self.locks_dir = self.root / "locks"
         for directory in (
             self.root,
             self.artifacts_dir,
             self.attempts_dir,
             self.plans_dir,
             self.logs_dir,
+            self.locks_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         self.database_path = self.root / "ledger.sqlite"
@@ -90,6 +94,14 @@ class ExperimentWorkspace:
                     FOREIGN KEY (plan_digest) REFERENCES plans(plan_digest),
                     FOREIGN KEY (run_identity) REFERENCES runs(run_identity)
                 );
+                CREATE TABLE IF NOT EXISTS plan_stage_states (
+                    plan_digest TEXT NOT NULL,
+                    instance_name TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (plan_digest, instance_name),
+                    FOREIGN KEY (plan_digest) REFERENCES plans(plan_digest)
+                );
                 CREATE TABLE IF NOT EXISTS attempts (
                     attempt_identity TEXT PRIMARY KEY,
                     run_identity TEXT NOT NULL,
@@ -132,18 +144,6 @@ class ExperimentWorkspace:
                     ON plan_runs(plan_digest, instance_name);
                 """
             )
-            connection.execute(
-                """
-                UPDATE attempts
-                SET state = ?, updated_at = ?
-                WHERE state = ?
-                """,
-                (
-                    AttemptState.INTERRUPTED,
-                    _now(),
-                    AttemptState.RUNNING,
-                ),
-            )
 
     def register_plan(self, plan: ResolvedExperimentPlan) -> Path:
         serialized = json.dumps(plan.to_dict(), ensure_ascii=False, sort_keys=True)
@@ -161,7 +161,63 @@ class ExperimentWorkspace:
                 """,
                 (plan.plan_digest, plan.name, serialized, _now()),
             )
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO plan_stage_states
+                    (plan_digest, instance_name, state, updated_at)
+                VALUES (?, ?, 'pending', ?)
+                """,
+                (
+                    (plan.plan_digest, stage.instance_name, _now())
+                    for stage in plan.stages
+                ),
+            )
         return path
+
+    def reset_plan_stage_states(self, plan_digest: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE plan_stage_states
+                SET state = 'pending', updated_at = ?
+                WHERE plan_digest = ?
+                """,
+                (_now(), plan_digest),
+            )
+
+    def set_plan_stage_state(
+        self,
+        plan_digest: str,
+        instance_name: str,
+        state: str,
+    ) -> None:
+        if state not in {"pending", "blocked", "skipped"}:
+            raise ValueError(f"unsupported Plan stage state {state!r}")
+        with self.connect() as connection:
+            changed = connection.execute(
+                """
+                UPDATE plan_stage_states
+                SET state = ?, updated_at = ?
+                WHERE plan_digest = ? AND instance_name = ?
+                """,
+                (state, _now(), plan_digest, instance_name),
+            )
+            if changed.rowcount != 1:
+                raise KeyError(
+                    f"unknown Plan stage {plan_digest}:{instance_name}"
+                )
+
+    def plan_stage_states(self, plan_digest: str) -> dict[str, str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT instance_name, state
+                FROM plan_stage_states
+                WHERE plan_digest = ?
+                """,
+                (plan_digest,),
+            ).fetchall()
+        return {row["instance_name"]: row["state"] for row in rows}
 
     def load_plan(self, plan_digest: str) -> ResolvedExperimentPlan:
         with self.connect() as connection:
@@ -319,6 +375,7 @@ class ExperimentWorkspace:
             AttemptState.RUNNING,
             AttemptState.INTERRUPTED,
             AttemptState.FINALIZING,
+            AttemptState.FAILED,
         )
         placeholders = ",".join("?" for _ in states)
         with self.connect() as connection:
@@ -453,6 +510,62 @@ class ExperimentWorkspace:
 
     def attempt_directory(self, identity: AttemptIdentity) -> Path:
         return self.attempts_dir / identity.value
+
+    @contextmanager
+    def run_lease(self, identity: RunIdentity) -> Iterator[None]:
+        """Prevent concurrent attempt selection/execution for one Run."""
+
+        lease_path = self.locks_dir / f"{identity.value}.lock"
+        lease = lease_path.open("a+", encoding="utf-8")
+        try:
+            try:
+                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                raise AttemptConflictError(
+                    f"Run {identity.value} is already active in another "
+                    "executor"
+                ) from error
+            yield
+        finally:
+            try:
+                fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
+            finally:
+                lease.close()
+
+    @contextmanager
+    def attempt_lease(
+        self, identity: AttemptIdentity
+    ) -> Iterator[None]:
+        """Hold the single-machine execution lease for one Attempt."""
+
+        directory = self.attempt_directory(identity)
+        if not directory.is_dir():
+            raise AttemptConflictError(f"unknown Attempt {identity.value}")
+        lease_path = directory / "execution.lock"
+        lease = lease_path.open("a+", encoding="utf-8")
+        try:
+            try:
+                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                raise AttemptConflictError(
+                    f"Attempt {identity.value} is already active in another "
+                    "executor"
+                ) from error
+            if self.attempt_state(identity) in {
+                AttemptState.RUNNING,
+                AttemptState.FINALIZING,
+            }:
+                self.set_attempt_state(identity, AttemptState.INTERRUPTED)
+            yield
+        finally:
+            try:
+                fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
+            finally:
+                lease.close()
 
     def completed_work(self, identity: AttemptIdentity) -> set[str]:
         with self.connect() as connection:
@@ -677,6 +790,20 @@ class ExperimentWorkspace:
                         run_ids,
                     ).fetchall()
                 ]
+        for run in runs:
+            if run["canonical_artifact_identity"]:
+                run["state"] = AttemptState.SUCCEEDED
+                continue
+            matching = [
+                attempt
+                for attempt in attempts
+                if attempt["run_identity"] == run["run_identity"]
+            ]
+            run["state"] = (
+                matching[-1]["state"]
+                if matching
+                else "pending"
+            )
         return PlanStatus(
             plan_digest=plan_digest,
             runs=tuple(runs),

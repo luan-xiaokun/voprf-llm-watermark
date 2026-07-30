@@ -17,12 +17,12 @@ from ..errors import PlanValidationError
 from ..identity import identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
 from .common import (
+    artifact_records,
     batches,
     require,
     resolve_model,
     validate_execution_settings,
 )
-from .detection import _artifact_records
 from .adaptive_forgery import describe
 
 
@@ -154,7 +154,7 @@ class _PerplexityExecution:
             dtype=context.execution_settings["dtype"],
             padding_side="right",
         )
-        self.records = _artifact_records(context.inputs[0])
+        self.records = artifact_records(context.inputs[0])
 
     def work_items(self) -> list[WorkItem]:
         result = []

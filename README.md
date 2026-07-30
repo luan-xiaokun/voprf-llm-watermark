@@ -76,7 +76,8 @@ print(detection_result)
 
 ### Data
 
-We select 500 samples from a subset of C4, `realnewslike`, to construct the dataset for our evaluation experiments.
+We select 1,000 samples from a subset of C4, `realnewslike`, to construct the
+dataset for the current evaluation experiments.
 These samples are saved to a jsonl file under the `data` folder.
 
 Additionally, we stick to one master key (seed) for watermarking purpose to ensure the comparison between different settings is fair.
@@ -86,9 +87,9 @@ Other dataset required for replicating the experiments can be downloaded by runn
 
 ### Experiment Runs
 
-Generation, adaptive forgery, detection, conditional perplexity, and
-downstream benchmark evaluation are stage-level Runs described by a YAML
-Experiment Plan:
+Generation, adaptive forgery, robustness, detection, conditional perplexity,
+diversity/similarity, and downstream benchmark evaluation are stage-level Runs
+described by a YAML Experiment Plan:
 
 ```shell
 wmexp check experiments/plans/qwen25-main-and-forgery.yaml
@@ -109,3 +110,9 @@ counts, query/token ratios, candidate ranks, fallback and cache rates,
 local-model perplexity, timing, communication bytes, and optional compact or
 full traces. Downstream detection adds the honest-audit comparison, and the
 perplexity stage evaluates conditional quality with its own model/tokenizer.
+The 1,000-sample adaptive-forgery Plan additionally emits token-length curves
+for oracle-query cost, median p-value, selected-green ratio, and attack success
+rate. Robustness transformations and diversity/similarity evaluation produce
+independent immutable Artifacts rather than modifying generation files.
+The robustness Plan uses OpenAI Responses API paraphrasing with
+`gpt-3.5-turbo-0125` and `gpt-5.6-sol`; Sol is pinned to low reasoning effort.

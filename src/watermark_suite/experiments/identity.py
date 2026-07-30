@@ -60,6 +60,19 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def directory_snapshot(path: Path) -> str:
+    files = sorted(item for item in path.rglob("*") if item.is_file())
+    document = [
+        {
+            "path": item.relative_to(path).as_posix(),
+            "size": item.stat().st_size,
+            "sha256": sha256_file(item),
+        }
+        for item in files
+    ]
+    return identity_for(document, prefix="snapshot")
+
+
 def derived_seed(seed: int, identity: str) -> int:
     payload = f"{seed}:{identity}".encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:4], "big")

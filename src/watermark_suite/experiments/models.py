@@ -129,10 +129,15 @@ class ExecutionReport:
     finalized_artifacts: tuple[str, ...]
     failed_stages: tuple[str, ...]
     blocked_stages: tuple[str, ...]
+    skipped_stages: tuple[str, ...]
 
     @property
     def succeeded(self) -> bool:
-        return not self.failed_stages and not self.blocked_stages
+        return not (
+            self.failed_stages
+            or self.blocked_stages
+            or self.skipped_stages
+        )
 
     def to_dict(self) -> JsonObject:
         return asdict(self)

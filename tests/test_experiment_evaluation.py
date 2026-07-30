@@ -1,0 +1,386 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+from watermark_suite.experiments.adapters import (
+    ResolutionContext,
+    StageExecutionContext,
+)
+from watermark_suite.experiments.models import (
+    ArtifactIdentity,
+    ArtifactRef,
+    AttemptIdentity,
+    RunIdentity,
+)
+from watermark_suite.experiments.openai_paraphrase import (
+    OpenAIParaphraseResult,
+    OpenAIParaphraser,
+)
+from watermark_suite.experiments.stages.robustness import (
+    RobustnessStageAdapter,
+)
+from watermark_suite.experiments.stages.text_evaluation import (
+    TextEvaluationStageAdapter,
+)
+
+
+MODEL = {
+    "checkpoint": "encoder",
+    "revision": "commit",
+    "location": "/models/encoder",
+    "verification": {"kind": "huggingface-cache", "commit": "commit"},
+    "tokenizer_checkpoint": "encoder",
+    "tokenizer_revision": "commit",
+    "tokenizer_location": "/models/encoder",
+    "tokenizer_verification": {
+        "kind": "huggingface-cache",
+        "commit": "commit",
+    },
+}
+WATERMARK = {
+    "method": "vow",
+    "enabled": True,
+    "window_size": 4,
+    "delta": 2.5,
+    "gamma": 0.5,
+    "server_seed_path": "/data/server_seed",
+    "server_seed_sha256": "digest",
+    "naive_baseline": False,
+}
+
+
+def resolution_context(tmp_path: Path) -> ResolutionContext:
+    return ResolutionContext(
+        repository=tmp_path,
+        models={},
+        datasets={},
+        defaults={},
+        code_revision="commit",
+    )
+
+
+def source_artifact(
+    tmp_path: Path,
+    records: list[dict],
+) -> ArtifactRef:
+    path = tmp_path / "artifact"
+    path.mkdir()
+    records_path = path / "records.jsonl"
+    records_path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    return ArtifactRef(
+        identity=ArtifactIdentity("artifact_source"),
+        path=path,
+        schema_revision="generated-text-v2",
+        run_identity=RunIdentity("run_source"),
+        attempt_identity=AttemptIdentity("attempt_source"),
+        manifest={
+            "semantic_settings": {
+                "model": MODEL,
+                "watermark": WATERMARK,
+            }
+        },
+    )
+
+
+def execution_context(
+    tmp_path: Path,
+    *,
+    definition,
+    source: ArtifactRef,
+    runtime,
+) -> StageExecutionContext:
+    return StageExecutionContext(
+        repository=tmp_path,
+        workspace=tmp_path / "workspace",
+        stage_name="stage",
+        run_identity="run",
+        attempt_identity="attempt",
+        settings=definition.settings,
+        semantic_settings=definition.semantic_settings,
+        execution_settings=definition.execution_settings,
+        inputs=(source,),
+        runtime=runtime,
+    )
+
+
+def test_robustness_stage_preserves_source_and_transformation_lineage(
+    tmp_path,
+):
+    source = source_artifact(
+        tmp_path,
+        [
+            {
+                "sample_id": "sample:1",
+                "prompt_text": "prompt",
+                "generated_text": "one two three four five six",
+            }
+        ],
+    )
+    original = (source.path / "records.jsonl").read_bytes()
+    adapter = RobustnessStageAdapter()
+    definition = adapter.resolve(
+        {
+            "transformation": {
+                "method": "word-deletion",
+                "rate": 0.5,
+            },
+            "batch_size": 1,
+            "target_field": "generated_text",
+            "seed": 42,
+            "device": "cpu",
+            "dtype": "float32",
+        },
+        resolution_context(tmp_path),
+    )
+    bound = adapter.bind_inputs(definition, (source,))
+    execution = adapter.prepare(
+        execution_context(
+            tmp_path,
+            definition=bound,
+            source=source,
+            runtime=object(),
+        )
+    )
+
+    result = execution.execute(execution.work_items()[0])
+    record = result.records[0]
+
+    assert (source.path / "records.jsonl").read_bytes() == original
+    assert record["sample_id"] == "sample:1"
+    assert record["original_text"] == "one two three four five six"
+    assert record["transformed_text"] != record["original_text"]
+    assert record["robustness"]["method"] == "word-deletion"
+    assert bound.semantic_settings["model"] == MODEL
+    assert bound.semantic_settings["watermark"] == WATERMARK
+
+
+class FakeResponses:
+    def __init__(self):
+        self.requests = []
+
+    def create(self, **request):
+        self.requests.append(request)
+        return SimpleNamespace(
+            id=f"response:{len(self.requests)}",
+            model=request["model"],
+            status="completed",
+            created_at=123,
+            service_tier="default",
+            output_text="rewritten text",
+            usage=SimpleNamespace(
+                input_tokens=12,
+                input_tokens_details=SimpleNamespace(
+                    cached_tokens=3,
+                    cache_write_tokens=2,
+                ),
+                output_tokens=7,
+                output_tokens_details=SimpleNamespace(
+                    reasoning_tokens=4,
+                ),
+                total_tokens=19,
+            ),
+        )
+
+
+def test_openai_paraphraser_only_sends_reasoning_for_reasoning_models():
+    responses = FakeResponses()
+    paraphraser = OpenAIParaphraser(
+        SimpleNamespace(responses=responses)
+    )
+
+    gpt35 = paraphraser.paraphrase(
+        "original",
+        model="gpt-3.5-turbo",
+        instruction="rewrite",
+        max_output_tokens=600,
+        temperature=None,
+        reasoning_effort=None,
+    )
+    sol = paraphraser.paraphrase(
+        "original",
+        model="gpt-5.6-sol",
+        instruction="rewrite",
+        max_output_tokens=600,
+        temperature=None,
+        reasoning_effort="low",
+    )
+
+    assert "reasoning" not in responses.requests[0]
+    assert "temperature" not in responses.requests[0]
+    assert responses.requests[1]["reasoning"] == {"effort": "low"}
+    assert gpt35.provenance["usage"]["cached_input_tokens"] == 3
+    assert sol.provenance["usage"]["reasoning_output_tokens"] == 4
+
+
+def test_robustness_stage_records_openai_response_provenance(
+    tmp_path,
+    monkeypatch,
+):
+    import watermark_suite.experiments.stages.robustness as module
+
+    class FakeParaphraser:
+        def paraphrase_many(self, texts, **settings):
+            assert texts == ["source text"]
+            assert settings["model"] == "gpt-5.6-sol"
+            assert settings["reasoning_effort"] == "low"
+            return [
+                OpenAIParaphraseResult(
+                    text="rewritten text",
+                    provenance={
+                        "provider": "openai",
+                        "endpoint": "responses",
+                        "requested_model": "gpt-5.6-sol",
+                        "response_model": "gpt-5.6-sol",
+                        "response_id": "response:1",
+                        "response_status": "completed",
+                        "response_created_at": 123,
+                        "service_tier": "default",
+                        "reasoning_effort": "low",
+                        "latency_seconds": 0.25,
+                        "usage": {
+                            "input_tokens": 10,
+                            "cached_input_tokens": 0,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 5,
+                            "reasoning_output_tokens": 2,
+                            "total_tokens": 15,
+                        },
+                    },
+                )
+            ]
+
+    monkeypatch.setattr(module, "OpenAIParaphraser", FakeParaphraser)
+    source = source_artifact(
+        tmp_path,
+        [
+            {
+                "sample_id": "sample:1",
+                "generated_text": "source text",
+            }
+        ],
+    )
+    adapter = RobustnessStageAdapter()
+    definition = adapter.resolve(
+        {
+            "transformation": {
+                "method": "openai-paraphrase",
+                "model": "gpt-5.6-sol",
+                "max_output_tokens": 600,
+                "temperature": None,
+                "reasoning_effort": "low",
+                "instruction": "rewrite",
+            },
+            "batch_size": 8,
+            "target_field": "generated_text",
+            "seed": 42,
+            "device": "cpu",
+            "dtype": "float32",
+        },
+        resolution_context(tmp_path),
+    )
+    bound = adapter.bind_inputs(definition, (source,))
+    execution = adapter.prepare(
+        execution_context(
+            tmp_path,
+            definition=bound,
+            source=source,
+            runtime=object(),
+        )
+    )
+
+    result = execution.execute(execution.work_items()[0])
+    summary = execution.summarize(list(result.records))
+
+    assert result.records[0]["transformed_text"] == "rewritten text"
+    assert result.records[0]["robustness"]["response_id"] == "response:1"
+    assert summary["openai"]["request_num"] == 1
+    assert summary["openai"]["usage"]["total_tokens"] == 15
+
+
+class FakeEncoder:
+    def encode(self, texts, **kwargs):
+        del kwargs
+        vectors = []
+        for text in texts:
+            lowered = text.lower()
+            vectors.append(
+                [
+                    float(lowered.count("cat")),
+                    float(lowered.count("dog")),
+                    float(len(lowered.split())),
+                ]
+            )
+        return np.asarray(vectors, dtype=float)
+
+
+class FakeRuntime:
+    def encoder(self, model, *, device):
+        assert model == MODEL
+        assert device == "cpu"
+        return FakeEncoder()
+
+
+def test_text_evaluation_emits_sample_similarity_and_diversity_summary(
+    tmp_path, monkeypatch
+):
+    import watermark_suite.experiments.stages.text_evaluation as module
+
+    monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
+    source = source_artifact(
+        tmp_path,
+        [
+            {
+                "sample_id": "sample:1",
+                "group": "prompt:1",
+                "original_text": "cat cat",
+                "transformed_text": "cat dog",
+            },
+            {
+                "sample_id": "sample:2",
+                "group": "prompt:1",
+                "original_text": "dog dog",
+                "transformed_text": "dog cat",
+            },
+        ],
+    )
+    adapter = TextEvaluationStageAdapter()
+    definition = adapter.resolve(
+        {
+            "metric_set": ["similarity", "diversity"],
+            "embedding_model": "encoder",
+            "batch_size": 2,
+            "reference_field": "original_text",
+            "target_field": "transformed_text",
+            "group_field": "group",
+            "device": "cpu",
+        },
+        resolution_context(tmp_path),
+    )
+    bound = adapter.bind_inputs(definition, (source,))
+    execution = adapter.prepare(
+        execution_context(
+            tmp_path,
+            definition=bound,
+            source=source,
+            runtime=FakeRuntime(),
+        )
+    )
+
+    result = execution.execute(execution.work_items()[0])
+    summary = execution.summarize(list(result.records))
+
+    assert all(
+        "cosine_similarity" in record["text_evaluation"]
+        for record in result.records
+    )
+    assert summary["metric_set"] == ["similarity", "diversity"]
+    assert summary["similarity"]["count"] == 2
+    assert summary["diversity"]["group_num"] == 1
+    assert summary["diversity"]["groups"][0]["group"] == "prompt:1"

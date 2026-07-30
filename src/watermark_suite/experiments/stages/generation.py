@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import statistics
-from typing import Any
 
 import torch
 
@@ -13,6 +12,7 @@ from ..adapters import (
 from ..errors import PlanValidationError
 from ..identity import derived_seed, identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
+from ..scheme_registry import WATERMARK_SCHEMES
 from .common import (
     batches,
     format_prompt,
@@ -22,16 +22,16 @@ from .common import (
     resolve_model,
     validate_execution_settings,
 )
-from .watermarks import generator_for, resolve_watermark
 
 
 class GenerationStageAdapter:
     kind = "generation"
-    revision = "generation-v1"
+    revision = "generation-v2"
     accepted_settings = {
         "model",
         "dataset",
         "num_samples",
+        "repetitions",
         "batch_size",
         "seed",
         "max_new_tokens",
@@ -52,7 +52,12 @@ class GenerationStageAdapter:
     ) -> ResolvedStageDefinition:
         require(settings, self._required, kind=self.kind)
         validate_execution_settings(settings)
-        for field in ("num_samples", "batch_size", "max_new_tokens"):
+        for field in (
+            "num_samples",
+            "repetitions",
+            "batch_size",
+            "max_new_tokens",
+        ):
             if not isinstance(settings[field], int) or settings[field] <= 0:
                 raise PlanValidationError(f"{field} must be a positive integer")
         if not isinstance(settings["seed"], int):
@@ -77,13 +82,14 @@ class GenerationStageAdapter:
             repository=context.repository,
             num_samples=settings["num_samples"],
         )
-        watermark = resolve_watermark(
+        watermark = WATERMARK_SCHEMES.resolve(
             settings["watermark"], context.repository
         )
         semantic = {
             "model": model,
             "dataset": dataset,
             "sample_manifest": dataset["selection"],
+            "repetitions": settings["repetitions"],
             "batch_size": settings["batch_size"],
             "seed": settings["seed"],
             "generation": {
@@ -110,7 +116,7 @@ class GenerationStageAdapter:
             settings=resolved,
             semantic_settings=semantic,
             execution_settings=execution,
-            artifact_schema_revision="generated-text-v1",
+            artifact_schema_revision="generated-text-v2",
             resource_key=(
                 f"causal:{model['checkpoint']}@{model['revision']}:"
                 f"{settings['device']}:{settings['dtype']}"
@@ -142,14 +148,32 @@ class _GenerationExecution:
             dtype=context.execution_settings["dtype"],
             padding_side="left",
         )
-        self.watermarker, self.no_watermark = generator_for(
+        self.watermarker, self.no_watermark = WATERMARK_SCHEMES.generator(
             context.semantic_settings["watermark"],
             self.model,
             self.tokenizer,
         )
-        self.samples = load_selected_samples(
+        source_samples = load_selected_samples(
             context.semantic_settings["dataset"]
         )
+        repetitions = context.semantic_settings["repetitions"]
+        self.samples = []
+        for sample in source_samples:
+            source_sample_id = sample["sample_id"]
+            for repetition in range(repetitions):
+                sample_id = (
+                    source_sample_id
+                    if repetitions == 1
+                    else f"{source_sample_id}:repeat:{repetition}"
+                )
+                self.samples.append(
+                    {
+                        **sample,
+                        "sample_id": sample_id,
+                        "source_sample_id": source_sample_id,
+                        "repetition": repetition,
+                    }
+                )
 
     def work_items(self) -> list[WorkItem]:
         result = []
@@ -218,6 +242,8 @@ class _GenerationExecution:
                 "prompt_text": model_prompt,
                 "generated_text": text,
                 "generated_token_num": token_num,
+                "source_sample_id": sample["source_sample_id"],
+                "repetition": sample["repetition"],
             }
             for field in ("index", "original_index", "url"):
                 if field in sample:
@@ -229,6 +255,10 @@ class _GenerationExecution:
         lengths = [record["generated_token_num"] for record in records]
         return {
             "sample_num": len(records),
+            "source_sample_num": len(
+                {record["source_sample_id"] for record in records}
+            ),
+            "repetitions": self.context.semantic_settings["repetitions"],
             "generated_token_num": sum(lengths),
             "mean_generated_token_num": (
                 statistics.mean(lengths) if lengths else 0.0

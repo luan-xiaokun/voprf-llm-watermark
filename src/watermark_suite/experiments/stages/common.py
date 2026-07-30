@@ -9,8 +9,8 @@ from datasets import load_dataset
 from huggingface_hub import snapshot_download
 
 from ..errors import PlanValidationError, ResolutionError
-from ..identity import identity_for, sha256_file
-from ..models import JsonObject
+from ..identity import directory_snapshot, sha256_file
+from ..models import ArtifactRef, JsonObject
 
 
 ELI5_SYSTEM_MESSAGE = (
@@ -51,32 +51,29 @@ def resolve_path(value: str, repository: Path) -> Path:
     return path.resolve()
 
 
-def _directory_snapshot(path: Path) -> str:
-    files = sorted(item for item in path.rglob("*") if item.is_file())
-    document = [
-        {
-            "path": item.relative_to(path).as_posix(),
-            "size": item.stat().st_size,
-            "sha256": sha256_file(item),
-        }
-        for item in files
-    ]
-    return identity_for(document, prefix="snapshot")
-
-
 def _resolve_checkpoint(
     checkpoint: str,
     revision: str | None,
     repository: Path,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, JsonObject]:
     local = resolve_path(checkpoint, repository)
     if local.exists():
         if not local.is_dir():
             raise ResolutionError(
                 f"model checkpoint must be a directory: {local}"
             )
-        selected_revision = revision or _directory_snapshot(local)
-        return checkpoint, selected_revision, str(local)
+        snapshot = directory_snapshot(local)
+        if revision is not None and revision != snapshot:
+            raise ResolutionError(
+                f"local model {local} declared revision {revision!r}, but its "
+                f"verified snapshot is {snapshot!r}"
+            )
+        return (
+            checkpoint,
+            snapshot,
+            str(local),
+            {"kind": "directory-snapshot", "digest": snapshot},
+        )
     try:
         location = Path(
             snapshot_download(
@@ -92,7 +89,12 @@ def _resolve_checkpoint(
             "Hugging Face cache; Plan checking never downloads models"
         ) from error
     commit = location.name
-    return checkpoint, commit, str(location)
+    return (
+        checkpoint,
+        commit,
+        str(location),
+        {"kind": "huggingface-cache", "commit": commit},
+    )
 
 
 def resolve_model(
@@ -128,25 +130,54 @@ def resolve_model(
         raise PlanValidationError(
             f"model {requested!r} needs a checkpoint"
         )
-    model_name, model_revision, location = _resolve_checkpoint(
+    (
+        model_name,
+        model_revision,
+        location,
+        model_verification,
+    ) = _resolve_checkpoint(
         checkpoint, value.get("revision"), repository
     )
     tokenizer_checkpoint = value.get("tokenizer_checkpoint", checkpoint)
-    tokenizer_name, tokenizer_revision, tokenizer_location = (
-        _resolve_checkpoint(
+    tokenizer_requested_revision = value.get(
+        "tokenizer_revision", value.get("revision")
+    )
+    if (
+        tokenizer_checkpoint == checkpoint
+        and tokenizer_requested_revision == value.get("revision")
+    ):
+        (
+            tokenizer_name,
+            tokenizer_revision,
+            tokenizer_location,
+            tokenizer_verification,
+        ) = (
+            model_name,
+            model_revision,
+            location,
+            model_verification,
+        )
+    else:
+        (
+            tokenizer_name,
+            tokenizer_revision,
+            tokenizer_location,
+            tokenizer_verification,
+        ) = _resolve_checkpoint(
             tokenizer_checkpoint,
-            value.get("tokenizer_revision", value.get("revision")),
+            tokenizer_requested_revision,
             repository,
         )
-    )
     return {
         "requested": requested,
         "checkpoint": model_name,
         "revision": model_revision,
         "location": location,
+        "verification": model_verification,
         "tokenizer_checkpoint": tokenizer_name,
         "tokenizer_revision": tokenizer_revision,
         "tokenizer_location": tokenizer_location,
+        "tokenizer_verification": tokenizer_verification,
     }
 
 
@@ -157,10 +188,16 @@ def _dataset_source(
     return (datasets[value], value) if alias else (value, None)
 
 
-def _jsonl_records(path: Path) -> list[JsonObject]:
+def _jsonl_records(
+    path: Path,
+    *,
+    limit: int | None = None,
+) -> list[JsonObject]:
     records: list[JsonObject] = []
     with path.open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
+            if limit is not None and len(records) >= limit:
+                break
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as error:
@@ -175,11 +212,21 @@ def _jsonl_records(path: Path) -> list[JsonObject]:
     return records
 
 
-def _load_dataset_records(spec: JsonObject) -> list[JsonObject]:
+def _load_dataset_records(
+    spec: JsonObject,
+    *,
+    limit: int | None = None,
+) -> list[JsonObject]:
     if spec["format"] == "jsonl":
-        return _jsonl_records(Path(spec["path"]))
+        return _jsonl_records(Path(spec["path"]), limit=limit)
     dataset = load_dataset(spec["path"], split=spec["split"])
+    if limit is not None:
+        dataset = dataset.select(range(min(limit, len(dataset))))
     return [dict(item) for item in dataset]
+
+
+def artifact_records(artifact: ArtifactRef) -> list[JsonObject]:
+    return _jsonl_records(artifact.path / "records.jsonl")
 
 
 def _sample_identity(
@@ -251,7 +298,7 @@ def resolve_dataset(
     if not path.exists():
         raise ResolutionError(f"dataset path does not exist: {path}")
     snapshot = (
-        sha256_file(path) if path.is_file() else _directory_snapshot(path)
+        sha256_file(path) if path.is_file() else directory_snapshot(path)
     )
     prompt_field = raw.get(
         "prompt_field", "prompt_text" if kind == "c4" else "question"
@@ -269,7 +316,7 @@ def resolve_dataset(
         "sample_id_field": id_field,
         "snapshot": snapshot,
     }
-    records = _load_dataset_records(resolved)
+    records = _load_dataset_records(resolved, limit=num_samples)
     if num_samples <= 0:
         raise PlanValidationError("num_samples must be positive")
     selected = records[: min(num_samples, len(records))]
@@ -299,15 +346,14 @@ def resolve_dataset(
 def load_selected_samples(spec: JsonObject) -> list[JsonObject]:
     path = Path(spec["path"])
     current_snapshot = (
-        sha256_file(path) if path.is_file() else _directory_snapshot(path)
+        sha256_file(path) if path.is_file() else directory_snapshot(path)
     )
     if current_snapshot != spec["snapshot"]:
         raise ResolutionError(
             f"dataset snapshot changed after Plan resolution: {path}"
         )
-    records = _load_dataset_records(spec)
     count = spec["selection"]["count"]
-    selected = records[:count]
+    selected = _load_dataset_records(spec, limit=count)
     actual_ids = [
         _sample_identity(
             record,
@@ -319,7 +365,7 @@ def load_selected_samples(spec: JsonObject) -> list[JsonObject]:
     if actual_ids != spec["selection"]["sample_ids"]:
         raise ResolutionError("selected Sample manifest no longer matches")
     return [
-        {"sample_id": sample_id, **record}
+        {**record, "sample_id": sample_id}
         for sample_id, record in zip(actual_ids, selected)
     ]
 

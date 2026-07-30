@@ -28,13 +28,13 @@ from ..adapters import (
 from ..errors import PlanValidationError, ResolutionError
 from ..identity import derived_seed, identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
+from ..scheme_registry import WATERMARK_SCHEMES
 from .common import (
     batches,
     require,
     resolve_model,
     validate_execution_settings,
 )
-from .watermarks import generator_for, resolve_watermark
 
 
 _EXPECTED_SAMPLE_NUM = {"gsm8k": 1319, "humaneval": 164}
@@ -143,7 +143,7 @@ class DownstreamStageAdapter:
             models=context.models,
             repository=context.repository,
         )
-        watermark = resolve_watermark(
+        watermark = WATERMARK_SCHEMES.resolve(
             settings["watermark"], context.repository
         )
         dataset = resolve_task_dataset(task)
@@ -216,7 +216,7 @@ class _DownstreamExecution:
             dtype=context.execution_settings["dtype"],
             padding_side="left",
         )
-        self.watermarker, self.no_watermark = generator_for(
+        self.watermarker, self.no_watermark = WATERMARK_SCHEMES.generator(
             semantic["watermark"], self.model, self.tokenizer
         )
         self.samples = _load_task_samples(semantic["task"])

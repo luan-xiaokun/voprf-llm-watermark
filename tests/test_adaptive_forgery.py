@@ -19,6 +19,9 @@ from watermark_suite.experiments.stages.adaptive_forgery import (
     build_sample_metrics,
     build_summary,
 )
+from watermark_suite.experiments.stages.detection import (
+    adaptive_forgery_curve,
+)
 
 
 class MappingOracle:
@@ -182,6 +185,74 @@ class AdaptiveWatermarkForgerTests(unittest.TestCase):
         self.assertEqual(
             compact["trace"][-1]["cumulative_oracle_query_count"], 6
         )
+
+
+def test_adaptive_forgery_curve_combines_cost_pvalue_and_asr():
+    records = [
+        {
+            "adaptive_forgery": {
+                "trace": [
+                    {
+                        "position": index,
+                        "cumulative_oracle_query_count": queries,
+                        "selected_green": green,
+                    }
+                    for index, (queries, green) in enumerate(
+                        [(0, None), (0, None), (1, True), (3, True)]
+                    )
+                ]
+            },
+            "detection": {
+                "milestones": [2, 4],
+                "step_p_values": [0.1, 0.000001],
+            },
+        },
+        {
+            "adaptive_forgery": {
+                "trace": [
+                    {
+                        "position": index,
+                        "cumulative_oracle_query_count": queries,
+                        "selected_green": green,
+                    }
+                    for index, (queries, green) in enumerate(
+                        [(0, None), (0, None), (2, False), (4, True)]
+                    )
+                ]
+            },
+            "detection": {
+                "milestones": [2, 4],
+                "step_p_values": [0.2, 0.01],
+            },
+        },
+    ]
+
+    curve = adaptive_forgery_curve(records, [0.00001])
+
+    assert curve == [
+        {
+            "token_num": 2,
+            "eligible_sample_num": 2,
+            "mean_oracle_query_count": 0,
+            "median_oracle_query_count": 0.0,
+            "mean_queries_per_token": 0.0,
+            "mean_selected_green_token_count": 0,
+            "mean_selected_green_ratio": 0.0,
+            "median_p_value": 0.15000000000000002,
+            "attack_success_rate": {"1e-05": 0.0},
+        },
+        {
+            "token_num": 4,
+            "eligible_sample_num": 2,
+            "mean_oracle_query_count": 3.5,
+            "median_oracle_query_count": 3.5,
+            "mean_queries_per_token": 0.875,
+            "mean_selected_green_token_count": 1.5,
+            "mean_selected_green_ratio": 0.75,
+            "median_p_value": 0.0050005,
+            "attack_success_rate": {"1e-05": 0.5},
+        },
+    ]
 
 
 class VOPRFColorOracleTests(unittest.TestCase):

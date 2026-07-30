@@ -236,6 +236,7 @@ figures/
 *.tar.*
 
 !/data/c4_realnewslike_subset_673.jsonl
+!/data/c4_realnewslike_subset_1000.jsonl
 !/data/pdw
 !/data/plot_data/
 !/data/server_seed

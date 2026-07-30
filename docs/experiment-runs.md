@@ -1,13 +1,15 @@
 # Running watermark experiments
 
-The `wmexp` interface resolves generation, adaptive forgery, detection, and
-conditional-perplexity stages into immutable, reproducible Runs. The example
-Plan at `experiments/plans/qwen25-main-and-forgery.yaml` uses Qwen2.5-7B for
-generation and forgery and Qwen2.5-14B for perplexity.
+The `wmexp` interface resolves generation, adaptive forgery, detection,
+conditional-perplexity, and downstream-evaluation stages into immutable,
+reproducible Runs. The example Plan at
+`experiments/plans/qwen25-main-and-forgery.yaml` uses Qwen2.5-7B for generation
+and forgery and Qwen2.5-14B for perplexity.
 
 ## Workflow
 
-Install the project, cache the model revisions locally, and check the Plan:
+Install the project, cache the model revisions and benchmark datasets locally,
+and check the Plan:
 
 ```bash
 uv sync
@@ -88,7 +90,21 @@ Unknown settings, unused defaults, dependency cycles, duplicate Sample
 identities, and excessive Sweep expansion are errors. CLI flags cannot
 override result-affecting settings. Detection derives its tokenizer and
 watermark settings from its source Artifact. Perplexity always uses the
-evaluation model's tokenizer.
+evaluation model's tokenizer. The downstream stage fixes GSM8K to its full
+official 4-shot test set and HumanEval to its full official 0-shot set; its
+Artifacts retain each answer or code completion and correctness result.
+
+The paper-result Plans currently live at:
+
+```text
+experiments/plans/figure-tpr-vs-token-length.yaml
+experiments/plans/figure-tpr-vs-ppl.yaml
+experiments/plans/table-downstream-performance.yaml
+```
+
+The first two Plans intentionally share identical generation semantics for
+their common schemes, so the second reuses canonical generation Artifacts
+created by the first.
 
 GPU stages run sequentially on one machine. Ready independent Runs may be
 reordered by model resource key to avoid unnecessary reloads; `wmexp check`

@@ -59,7 +59,7 @@ def correlation(
 
 class PerplexityStageAdapter:
     kind = "perplexity"
-    revision = "perplexity-v1"
+    revision = "perplexity-v2"
     accepted_settings = {
         "model",
         "batch_size",
@@ -101,7 +101,7 @@ class PerplexityStageAdapter:
             settings={**settings, "model": model},
             semantic_settings=semantic,
             execution_settings=execution,
-            artifact_schema_revision="conditional-perplexity-v1",
+            artifact_schema_revision="conditional-perplexity-v2",
             resource_key=(
                 f"causal:{model['checkpoint']}@{model['revision']}:"
                 f"{settings['device']}:{settings['dtype']}"
@@ -117,7 +117,26 @@ class PerplexityStageAdapter:
             raise PlanValidationError(
                 "perplexity requires exactly one source Artifact"
             )
-        return definition
+        watermark = inputs[0].manifest.get("semantic_settings", {}).get(
+            "watermark"
+        )
+        if not isinstance(watermark, dict):
+            raise PlanValidationError(
+                "source Artifact does not declare watermark provenance"
+            )
+        return ResolvedStageDefinition(
+            settings={
+                **definition.settings,
+                "derived_watermark": watermark,
+            },
+            semantic_settings={
+                **definition.semantic_settings,
+                "watermark": watermark,
+            },
+            execution_settings=definition.execution_settings,
+            artifact_schema_revision=definition.artifact_schema_revision,
+            resource_key=definition.resource_key,
+        )
 
     def prepare(
         self, context: StageExecutionContext
@@ -259,6 +278,7 @@ class _PerplexityExecution:
         ]
         summary: JsonObject = {
             "sample_num": len(records),
+            "watermark": self.context.semantic_settings["watermark"],
             "evaluation_model": self.context.semantic_settings["model"],
             "conditional_perplexity": perplexity,
             "mean_negative_log_likelihood": mean_nll,

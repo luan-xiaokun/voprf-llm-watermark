@@ -86,8 +86,9 @@ Other dataset required for replicating the experiments can be downloaded by runn
 
 ### Experiment Runs
 
-Generation, adaptive forgery, detection, and conditional perplexity are
-stage-level Runs described by a YAML Experiment Plan:
+Generation, adaptive forgery, detection, conditional perplexity, and
+downstream benchmark evaluation are stage-level Runs described by a YAML
+Experiment Plan:
 
 ```shell
 wmexp check experiments/plans/qwen25-main-and-forgery.yaml

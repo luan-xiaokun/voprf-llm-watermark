@@ -43,7 +43,7 @@ def _artifact_records(artifact: ArtifactRef) -> list[JsonObject]:
 
 class DetectionStageAdapter:
     kind = "detection"
-    revision = "detection-v1"
+    revision = "detection-v2"
     accepted_settings = {
         "batch_size",
         "target_field",
@@ -86,7 +86,7 @@ class DetectionStageAdapter:
             settings=dict(settings),
             semantic_settings=semantic,
             execution_settings={"device": settings["device"]},
-            artifact_schema_revision="watermark-detection-v1",
+            artifact_schema_revision="watermark-detection-v2",
             resource_key="input-bound:detection",
         )
 
@@ -312,6 +312,30 @@ class _DetectionExecution:
                 total_tokens / len(records) if records else 0.0
             ),
         }
+        milestone_values: dict[int, list[float]] = {}
+        for record in records:
+            detection = record["detection"]
+            milestones = detection.get("milestones") or []
+            step_p_values = detection.get("step_p_values") or []
+            for milestone, p_value in zip(milestones, step_p_values):
+                milestone_values.setdefault(int(milestone), []).append(
+                    float(p_value)
+                )
+        if milestone_values:
+            summary["milestone_detection_rate"] = [
+                {
+                    "token_num": token_num,
+                    "eligible_sample_num": len(values),
+                    "detection_rate": {
+                        f"{level:.0e}": (
+                            sum(value < level for value in values)
+                            / len(values)
+                        )
+                        for level in levels
+                    },
+                }
+                for token_num, values in sorted(milestone_values.items())
+            ]
         if records and all(
             "effective_token_num" in record["detection"]
             for record in records

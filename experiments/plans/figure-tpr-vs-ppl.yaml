@@ -1,0 +1,150 @@
+version: 1
+name: figure-tpr-vs-ppl-qwen25
+
+models:
+  qwen-generation:
+    checkpoint: Qwen/Qwen2.5-7B
+  qwen-ppl:
+    checkpoint: Qwen/Qwen2.5-14B
+
+datasets:
+  c4-evaluation:
+    kind: c4
+    format: jsonl
+    path: data/c4_realnewslike_subset_1000.jsonl
+    split: train
+    prompt_field: prompt_text
+    sample_id_field: original_index
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+
+stages:
+  # This sweep deliberately uses the same generation semantics as the
+  # token-length Plan, so its five shared Runs reuse canonical Artifacts.
+  generate_watermarked:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    sweep:
+      watermark:
+        - method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 3.0
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.625
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 2.0
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: lefthash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - method: selfhash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - method: rdf
+          enabled: true
+          length: 256
+          seed: 42
+          watermark_device: cpu
+          n_runs: 100
+        # PDW is evaluated and retained in the report Artifact, but its
+        # high-PPL point can be omitted by the eventual figure renderer.
+        - method: pdw
+          enabled: true
+          sk_path: data/pdw/sk
+          pk_path: data/pdw/pk
+          params_path: data/pdw/params
+          signature_segment_length: 16
+          bit_size: 2
+          message_length: 8
+          max_planted_errors: 2
+          seed: 0
+        - method: upv
+          enabled: true
+          detector_dir: experiments/upv_baseline/model
+          window_size: 4
+          gamma: 0.5
+          delta: 2.0
+          bit_number: 18
+          layers: 5
+          beam_size: 0
+
+  detect_watermarked:
+    kind: detection
+    input: generate_watermarked
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001, 0.01]
+    use_local: true
+    step_size: null
+
+  evaluate_watermarked_ppl:
+    kind: perplexity
+    input: detect_watermarked
+    model: qwen-ppl
+    batch_size: 2
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text
+
+  generate_unwatermarked:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: none
+      enabled: false
+
+  evaluate_unwatermarked_ppl:
+    kind: perplexity
+    input: generate_unwatermarked
+    model: qwen-ppl
+    batch_size: 2
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text

@@ -1,5 +1,6 @@
 from .adaptive_forgery import AdaptiveForgeryStageAdapter
 from .detection import DetectionStageAdapter
+from .downstream import DownstreamStageAdapter
 from .generation import GenerationStageAdapter
 from .perplexity import PerplexityStageAdapter
 
@@ -10,6 +11,7 @@ def default_stage_adapters():
         AdaptiveForgeryStageAdapter(),
         DetectionStageAdapter(),
         PerplexityStageAdapter(),
+        DownstreamStageAdapter(),
     )
     return {adapter.kind: adapter for adapter in adapters}
 
@@ -17,6 +19,7 @@ def default_stage_adapters():
 __all__ = [
     "AdaptiveForgeryStageAdapter",
     "DetectionStageAdapter",
+    "DownstreamStageAdapter",
     "GenerationStageAdapter",
     "PerplexityStageAdapter",
     "default_stage_adapters",

@@ -2296,6 +2296,7 @@ dependencies = [
     { name = "diffusers" },
     { name = "diversity" },
     { name = "einops" },
+    { name = "human-eval" },
     { name = "msgpack" },
     { name = "nltk" },
     { name = "numpy" },
@@ -2321,7 +2322,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "human-eval" },
     { name = "matplotlib" },
 ]
 
@@ -2336,6 +2336,7 @@ requires-dist = [
     { name = "diffusers", specifier = ">=0.35.2" },
     { name = "diversity", specifier = ">=0.2.2" },
     { name = "einops", specifier = "==0.8.1" },
+    { name = "human-eval", specifier = ">=1.0.3" },
     { name = "msgpack", specifier = "==0.6.2" },
     { name = "nltk", specifier = ">=3.9.1" },
     { name = "numpy", specifier = ">=2.3.2" },
@@ -2359,10 +2360,7 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "human-eval", specifier = ">=1.0.3" },
-    { name = "matplotlib", specifier = ">=3.10.5" },
-]
+dev = [{ name = "matplotlib", specifier = ">=3.10.5" }]
 
 [[package]]
 name = "weasel"

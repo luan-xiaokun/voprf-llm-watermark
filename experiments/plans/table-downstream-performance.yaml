@@ -1,0 +1,102 @@
+version: 1
+name: table-downstream-performance-qwen25-7b-instruct
+
+models:
+  qwen-instruct:
+    checkpoint: Qwen/Qwen2.5-7B-Instruct
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+
+stages:
+  evaluate_gsm8k:
+    kind: downstream
+    task: gsm8k
+    model: qwen-instruct
+    batch_size: 8
+    seed: 42
+    max_new_tokens: 1024
+    num_shots: 4
+    evaluation_workers: 4
+    execution_timeout: 3.0
+    sweep:
+      watermark:
+        - &no_watermark
+          method: none
+          enabled: false
+        - &lefthash
+          method: lefthash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - &selfhash
+          method: selfhash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - &rdf
+          method: rdf
+          enabled: true
+          length: 256
+          seed: 42
+          watermark_device: cpu
+          n_runs: 100
+        - &pdw
+          method: pdw
+          enabled: true
+          sk_path: data/pdw/sk
+          pk_path: data/pdw/pk
+          params_path: data/pdw/params
+          signature_segment_length: 16
+          bit_size: 2
+          message_length: 8
+          max_planted_errors: 2
+          seed: 0
+        - &upv
+          method: upv
+          enabled: true
+          detector_dir: experiments/upv_baseline/model
+          window_size: 4
+          gamma: 0.5
+          delta: 2.0
+          bit_number: 18
+          layers: 5
+          beam_size: 0
+        - &vow_delta_2_5
+          method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 2.5
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - &vow_delta_2_0
+          method: vow
+          enabled: true
+          window_size: 4
+          gamma: 0.5
+          delta: 2.0
+          server_seed_path: data/server_seed
+          naive_baseline: false
+
+  evaluate_humaneval:
+    kind: downstream
+    task: humaneval
+    model: qwen-instruct
+    batch_size: 8
+    seed: 42
+    max_new_tokens: 1024
+    num_shots: 0
+    evaluation_workers: 4
+    execution_timeout: 3.0
+    sweep:
+      watermark:
+        - *no_watermark
+        - *lefthash
+        - *selfhash
+        - *rdf
+        - *pdw
+        - *upv
+        - *vow_delta_2_5
+        - *vow_delta_2_0

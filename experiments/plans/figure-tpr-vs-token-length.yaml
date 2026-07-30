@@ -1,0 +1,180 @@
+version: 1
+name: figure-tpr-vs-token-length-qwen25-7b
+
+models:
+  qwen-generation:
+    checkpoint: Qwen/Qwen2.5-7B
+
+datasets:
+  c4-evaluation:
+    kind: c4
+    format: jsonl
+    path: data/c4_realnewslike_subset_1000.jsonl
+    split: train
+    prompt_field: prompt_text
+    sample_id_field: original_index
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+
+stages:
+  generate_vow_default:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: vow
+      enabled: true
+      window_size: 4
+      gamma: 0.5
+      delta: 2.5
+      server_seed_path: data/server_seed
+      naive_baseline: false
+
+  detect_vow_default:
+    kind: detection
+    input: generate_vow_default
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: 5
+
+  generate_lefthash:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: lefthash
+      enabled: true
+      gamma: 0.25
+      delta: 2.0
+
+  detect_lefthash:
+    kind: detection
+    input: generate_lefthash
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: 5
+
+  generate_selfhash:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: selfhash
+      enabled: true
+      gamma: 0.25
+      delta: 2.0
+
+  detect_selfhash:
+    kind: detection
+    input: generate_selfhash
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: 5
+
+  generate_rdf:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: rdf
+      enabled: true
+      length: 256
+      seed: 42
+      watermark_device: cpu
+      n_runs: 100
+
+  detect_rdf:
+    kind: detection
+    input: generate_rdf
+    batch_size: 16
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: 20
+
+  generate_upv:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 16
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: upv
+      enabled: true
+      detector_dir: experiments/upv_baseline/model
+      window_size: 4
+      gamma: 0.5
+      delta: 2.0
+      bit_number: 18
+      layers: 5
+      beam_size: 0
+
+  detect_upv:
+    kind: detection
+    input: generate_upv
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: 10

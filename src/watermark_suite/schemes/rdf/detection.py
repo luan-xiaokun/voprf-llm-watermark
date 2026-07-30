@@ -1,6 +1,7 @@
 # adapted from https://github.com/jthickstun/watermark/blob/main/demo/detect.py
 
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 
@@ -12,6 +13,7 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from ..detector import DetectionCost, DetectionResult, WatermarkDetector
 
 pyximport.install(
+    build_dir=f"{tempfile.gettempdir()}/watermark-suite-pyxbuild",
     reload_support=True,
     language_level=sys.version_info[0],
     setup_args={"include_dirs": np.get_include()},

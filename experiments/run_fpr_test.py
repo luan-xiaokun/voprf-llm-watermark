@@ -116,7 +116,7 @@ def parse_args():
     # Method specific args
     parser.add_argument(
         "--delta", type=float, default=2.5
-    )  # Default from run_detection.py
+    )
     parser.add_argument("--gamma", type=float, default=0.5)
     parser.add_argument("--window_size", type=int, default=4)
     parser.add_argument("--length", type=int, default=256)  # RDF

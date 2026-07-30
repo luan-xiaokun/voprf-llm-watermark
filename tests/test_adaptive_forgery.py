@@ -15,7 +15,7 @@ from watermark_suite.attacks import (
 )
 from watermark_suite.core.metrics import calculate_perplexities
 from watermark_suite.schemes.vow import VOWDetector
-from experiments.run_adaptive_forgery import (
+from watermark_suite.experiments.stages.adaptive_forgery import (
     build_sample_metrics,
     build_summary,
 )

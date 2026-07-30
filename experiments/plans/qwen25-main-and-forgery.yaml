@@ -1,0 +1,111 @@
+version: 1
+name: qwen25-main-and-forgery
+
+models:
+  qwen-main:
+    checkpoint: Qwen/Qwen2.5-7B
+  qwen-ppl:
+    checkpoint: Qwen/Qwen2.5-14B
+
+datasets:
+  c4-main:
+    kind: c4
+    format: jsonl
+    path: data/c4_realnewslike_subset_1000.jsonl
+    split: train
+    prompt_field: prompt_text
+    sample_id_field: original_index
+
+defaults:
+  device: auto
+  dtype: bfloat16
+
+stages:
+  generate_vow:
+    kind: generation
+    model: qwen-main
+    dataset: c4-main
+    num_samples: 500
+    batch_size: 8
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    sweep:
+      watermark:
+        - method: vow
+          enabled: true
+          window_size: 4
+          delta: 2.5
+          gamma: 0.375
+          server_seed_path: data/server_seed
+          naive_baseline: false
+        - method: vow
+          enabled: false
+          window_size: 4
+          delta: 2.5
+          gamma: 0.375
+          server_seed_path: data/server_seed
+          naive_baseline: false
+
+  detect_generation:
+    kind: detection
+    input: generate_vow
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.000001, 0.00001, 0.0001, 0.001, 0.01]
+    use_local: true
+    step_size: null
+
+  ppl_generation:
+    kind: perplexity
+    input: detect_generation
+    model: qwen-ppl
+    batch_size: 2
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text
+
+  forge_vow:
+    kind: adaptive-forgery
+    model: qwen-main
+    dataset: c4-main
+    num_samples: 100
+    batch_size: 1
+    seed: 42
+    max_new_tokens: 200
+    max_candidates: 8
+    watermark:
+      method: vow
+      enabled: true
+      window_size: 4
+      delta: 2.5
+      gamma: 0.375
+      server_seed_path: data/server_seed
+      naive_baseline: false
+    allow_special_tokens: false
+    trace_level: compact
+
+  detect_forgery:
+    kind: detection
+    input: forge_vow
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.000001, 0.00001, 0.0001, 0.001, 0.01]
+    use_local: true
+    step_size: null
+
+  ppl_forgery:
+    kind: perplexity
+    input: detect_forgery
+    model: qwen-ppl
+    batch_size: 2
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text

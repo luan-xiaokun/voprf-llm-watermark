@@ -21,6 +21,7 @@ dependencies = [
     "optimum>=2.0.0",
     "pandas>=2.3.1",
     "pyarrow>=21.0.0",
+    "pyyaml>=6.0.2",
     "reedsolo>=1.7.0",
     "scikit-learn>=1.7.1",
     "scipy>=1.16.1",
@@ -33,6 +34,9 @@ dependencies = [
     "voprf_py @ {root}/voprf-py",
     "wheel>=0.45.1",
 ]
+
+[project.scripts]
+wmexp = "watermark_suite.experiments.cli:main"
 
 [build-system]
 requires = ["hatchling", "setuptools", "cython", "numpy"]

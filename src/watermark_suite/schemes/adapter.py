@@ -174,9 +174,20 @@ class WatermarkAdapter:
         logits_processor = None
         if not no_watermark:
             logits_processor = self.get_logits_processor(do_sample, num_beams, top_k)
-        timing_logits_processor = GpuTimingLogitsProcessor(logits_processor)
-
-        logits_processor_list = LogitsProcessorList([timing_logits_processor])
+        timing_logits_processor = None
+        if self.timing:
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "GPU timing was requested, but CUDA is unavailable"
+                )
+            timing_logits_processor = GpuTimingLogitsProcessor(logits_processor)
+            logits_processor_list = LogitsProcessorList(
+                [timing_logits_processor]
+            )
+        elif logits_processor is not None:
+            logits_processor_list = LogitsProcessorList([logits_processor])
+        else:
+            logits_processor_list = LogitsProcessorList()
 
         generation_config = self.get_generation_config(
             max_new_tokens=max_new_tokens,
@@ -190,20 +201,21 @@ class WatermarkAdapter:
             no_watermark=no_watermark,
         )
 
-        output_ids = self.model.generate(
-            **inputs,
-            generation_config=generation_config,
-            tokenizer=self.tokenizer,
-            logits_processor=logits_processor_list,
-            **model_specific_params,
-        )
+        try:
+            output_ids = self.model.generate(
+                **inputs,
+                generation_config=generation_config,
+                tokenizer=self.tokenizer,
+                logits_processor=logits_processor_list,
+                **model_specific_params,
+            )
+        finally:
+            # RDF temporarily replaces the model's sampling method. Restore it
+            # even when generation fails so a resumed Attempt starts cleanly.
+            self._post_generation()
 
         if self.timing and timing_logits_processor is not None:
             print(timing_logits_processor.get_results())
-
-        # post generation processing
-        # e.g., replacing the hacked _sample method with the original one
-        self._post_generation()
 
         if self.model.config.is_encoder_decoder:
             generated_ids = output_ids

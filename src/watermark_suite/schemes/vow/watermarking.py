@@ -301,22 +301,22 @@ class VOWAdapter(WatermarkAdapter):
             suppress_tokens=suppress_tokens,
         )
 
-        output_ids = self.model.generate(
-            **inputs,
-            generation_config=generation_config,
-            tokenizer=self.tokenizer,
-            logits_processor=logits_processor,
-            **model_specific_params,
-        )
+        try:
+            output_ids = self.model.generate(
+                **inputs,
+                generation_config=generation_config,
+                tokenizer=self.tokenizer,
+                logits_processor=logits_processor,
+                **model_specific_params,
+            )
+        finally:
+            if original_sample is not None:
+                recover_sampling_mixin(self.model, original_sample)
 
         if self.timing and isinstance(
             timing_logits_processor, GpuTimingLogitsProcessor
         ):
             print(timing_logits_processor.get_results())
-
-        # recover the original _sample method if it was replaced
-        if original_sample is not None:
-            recover_sampling_mixin(self.model, original_sample)
 
         if self.model.config.is_encoder_decoder:
             generated_ids = output_ids

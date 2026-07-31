@@ -56,7 +56,7 @@ class RDFAdapter(WatermarkAdapter):
 
     def _post_generation(self) -> None:
         if self.original_generate is not None:
-            self.model._sample = types.MethodType(self.original_generate, self.model)
+            self.model.generate = self.original_generate
             self.original_generate = None
 
             del self.model.watermark_n

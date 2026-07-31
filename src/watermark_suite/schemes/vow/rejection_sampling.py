@@ -370,7 +370,7 @@ def recover_sampling_mixin(model: PreTrainedModel, original_sample):
     if not hasattr(model, "window_size"):
         raise ValueError("Model does not have a rejection sampling mixin applied.")
 
-    model._sample = types.MethodType(original_sample, model)
+    model._sample = original_sample
 
     del model.window_size
     del model.delta

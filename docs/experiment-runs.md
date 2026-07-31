@@ -98,6 +98,29 @@ Plan defaults -> stage settings -> Sweep assignment
 Unknown settings, unused defaults, dependency cycles, duplicate Sample
 identities, and excessive Sweep expansion are errors. CLI flags cannot
 override result-affecting settings. Device and dtype are part of Run Identity.
+The singular `input` field maps a downstream stage over every resolved
+upstream instance. The plural `inputs` field collects every resolved instance
+of the named stages into one downstream Run; it never creates an implicit
+Cartesian product.
+
+Run Identity uses stage semantic/runtime settings, ordered source Artifacts,
+adapter revision, and Artifact schema revision. The repository Git revision is
+retained in Plan, Attempt, and Artifact provenance but does not invalidate an
+otherwise unchanged Run. Result-affecting implementation changes must bump
+the affected adapter revision; changes to shared execution modules must bump
+every consuming adapter.
+
+Dataset and prompt handling form one `dataset-prompt-v1` module. Plan
+resolution turns a dataset alias or task into a Prompt Population containing
+the verified dataset snapshot, ordered Sample identities, a content-identified
+Prompt Policy, and prompt-related generation controls. Execution materializes
+that exact population and re-verifies its snapshot and Sample manifest before
+rendering prompts. Generation, adaptive forgery, and downstream callers receive
+only typed Prompt Samples; they do not load benchmark data, apply chat
+templates, construct task demonstrations, or assign repetition identities.
+The four adapters are C4, ELI5, GSM8K, and HumanEval. GSM8K and HumanEval always
+resolve their complete official test populations.
+
 Local model directories use a verified content snapshot; cached Hugging Face
 models retain their resolved commit, and model/tokenizer plus PDW/UPV material
 is checked again before use. Detection derives its tokenizer and watermark
@@ -139,6 +162,53 @@ and diversity. Diversity generation uses `repetitions` to retain a stable
 source-prompt group while assigning every sampled continuation its own Sample
 identity. Aggregate diversity includes distinct-1/2/3, self-BLEU-4, and Vendi
 score; similarity retains per-sample cosine scores and distribution summaries.
+
+Each paper Plan ends in a `result-aggregation` stage. It validates all source
+schemas and transitive lineage, rejects incomparable sample populations or
+ambiguous joins, and emits an `experiment-report-v1` Artifact. Its
+`records.jsonl` is a deterministic long-form metric table with scientific
+dimensions, exact numerator/denominator counts, uncertainty metadata, and
+source Artifact identities. Supported recipes are TPR/token, TPR/PPL,
+downstream performance, robustness, adaptive forgery, and diversity.
+
+Before a recipe runs, the in-process `artifact-interpretation-v1` module
+preflights every root Artifact and transitive ancestor. Support is exact by
+Artifact kind and schema revision; unknown revisions, kind/schema mismatches,
+missing lineage, conflicting inherited scientific provenance, and cheap
+count/rate inconsistencies fail closed in one aggregated diagnostic. The
+module normalizes lineage into scientific dimensions, Artifact Relations,
+and aggregate Metric Facts. Recipes cannot read raw manifests, summaries, or
+Sample records. Per-Sample Metric Facts are available through a filtered
+streaming interface and are validated only when requested; aggregate report
+assembly therefore does not scan `records.jsonl`.
+
+Producer schemas `generated-text-v3`, `adaptive-forgery-v2`,
+`gsm8k-evaluation-v2`, and `humaneval-evaluation-v2` expose the resolved Prompt
+Population as the single population/prompt provenance seam. Artifact
+Interpretation derives both population identity and generation dimensions from
+that value; the superseded producer revisions are intentionally unsupported.
+
+Report rendering is downstream of the immutable metric Artifact:
+
+```bash
+python analysis/render_report.py \
+  output/experiments/artifacts/artifact_REPORT \
+  --csv output/reports/tpr-token.csv \
+  --figure output/reports/tpr-token.pdf
+
+python analysis/render_report.py \
+  artifact_REPORT \
+  --workspace output/experiments \
+  --markdown output/reports/downstream.md
+```
+
+TPR/PPL report exports always retain PDW. Its point is omitted from the
+primary figure by default because of the plot scale; pass `--include-pdw` to
+render it as well.
+
+The migrated plotting entry points under `analysis/plot/` accept the same
+Artifact, Workspace, and output options. They do not discover results from
+model-specific filenames or contain hard-coded metric values.
 
 The paper-result Plans currently live at:
 

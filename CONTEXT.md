@@ -38,6 +38,27 @@ The identity assigned when an Artifact is finalized, derived from its producing
 Run, Attempt, schema revision, and content digests.
 _Avoid_: Filename, expected path
 
+**Artifact Interpretation**:
+The validated scientific meaning of one Artifact and its transitive lineage,
+expressed as normalized provenance, dimensions, metric facts, and distributions.
+It does not join independent Artifacts or choose comparative reporting policy.
+_Avoid_: Raw summary, report recipe
+
+**Lineage Invariant**:
+A scientific fact inherited through an Artifact lineage that may be repeated
+but never overridden; repeated declarations must agree exactly.
+_Avoid_: Child override, first matching value
+
+**Metric Fact**:
+A normalized scientific observation from one Artifact Interpretation, scoped
+either to an aggregate population or to one Sample.
+_Avoid_: Raw record field, raw summary field, report row
+
+**Artifact Relation**:
+A normalized direct or transitive lineage relationship between identified
+Artifacts. It states provenance structure without choosing a comparative join.
+_Avoid_: Raw manifest link, report pairing
+
 **Canonical Artifact**:
 The first finalized Artifact selected for a Run's default reuse. Artifacts from
 later successful Attempts remain available but require explicit selection.
@@ -47,6 +68,18 @@ _Avoid_: Latest Artifact
 A stable dataset item selected for a Run, identified independently of its row
 position or processing order.
 _Avoid_: Row, example
+
+**Prompt Policy**:
+A versioned, content-identified rule that renders one Sample into the source
+prompt retained for analysis and the model prompt submitted for generation.
+It owns task demonstrations, instructions, chat-template use, and stop strings.
+_Avoid_: Prompt string, caller formatting
+
+**Prompt Population**:
+An immutable selected Sample population paired with its Prompt Policy. It owns
+dataset snapshot verification, Sample identities, prompt rendering, and
+repetition identities as one resolved scientific input to a Run.
+_Avoid_: Dataset path, sample manifest
 
 **Sweep**:
 A collection of Runs formed by varying settings for comparison. A Sweep groups

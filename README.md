@@ -103,6 +103,11 @@ SQLite lineage, and immutable Artifact bundles. See
 [`docs/experiment-runs.md`](docs/experiment-runs.md) for Plan rules, Workspace
 layout, rerun semantics, and legacy-output archival.
 
+C4, ELI5, GSM8K, and HumanEval enter Runs through one Dataset & Prompt
+interface. It pins the dataset population and Prompt Policy together, verifies
+them again at execution, and gives generation, forgery, and downstream stages
+the same typed Prompt Samples.
+
 The adaptive-forgery stage fixes tokens left to right and queries at most
 `k` high-probability candidates through the public blinded VOPRF interface.
 The forger receives no watermark key. Its Artifact records per-sample query
@@ -116,3 +121,8 @@ rate. Robustness transformations and diversity/similarity evaluation produce
 independent immutable Artifacts rather than modifying generation files.
 The robustness Plan uses OpenAI Responses API paraphrasing with
 `gpt-3.5-turbo-0125` and `gpt-5.6-sol`; Sol is pinned to low reasoning effort.
+Final result-aggregation Runs join compatible evaluation Artifacts into
+versioned, figure-ready long-form metric reports with exact lineage. A
+fail-closed Artifact Interpretation layer validates supported schema pairs,
+transitive scientific provenance, and counts before recipes see normalized
+Metric Facts.

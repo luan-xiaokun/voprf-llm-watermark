@@ -26,6 +26,10 @@ class DependencyCycleError(PlanError):
     """Stage dependencies in an Experiment Plan contain a cycle."""
 
 
+class PlanProtocolError(PlanError):
+    """A Plan graph transition violates the execution protocol."""
+
+
 class ResolutionError(ExperimentRunError):
     """A revision, input, or setting cannot be resolved exactly."""
 

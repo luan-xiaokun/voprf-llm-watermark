@@ -39,6 +39,11 @@ from .models import (
     WorkResult,
 )
 from .plan import code_revision, resolve_plan
+from .plan_graph import (
+    Continuation,
+    ResolvedPlanGraph,
+    RunOutcome,
+)
 from .workspace import ExperimentWorkspace
 
 
@@ -582,59 +587,31 @@ class ExperimentRuns:
                 + ", ".join(sorted(unknown))
             )
 
+        graph = ResolvedPlanGraph(resolved)
+        graph_state = graph.start()
         artifacts: dict[str, ArtifactRef] = {}
         failed: set[str] = set()
         blocked: set[str] = set()
         skipped: set[str] = set()
-        pending = list(resolved.stages)
         reused: list[str] = []
         resumed: list[str] = []
         created: list[str] = []
         finalized: list[str] = []
-        current_resource: str | None = None
+        loaded_resource: str | None = None
 
-        while pending:
-            for stage in tuple(pending):
-                if any(
-                    name in failed or name in blocked
-                    for name in stage.input_instances
-                ):
-                    blocked.add(stage.instance_name)
-                    self.workspace.set_plan_stage_state(
-                        resolved.plan_digest,
-                        stage.instance_name,
-                        "blocked",
-                    )
-                    pending.remove(stage)
-            if not pending:
-                break
-            ready = [
-                stage
-                for stage in pending
-                if all(
-                    name in artifacts for name in stage.input_instances
-                )
-            ]
-            if not ready:
-                raise RuntimeError("no runnable stage remains")
-            ready.sort(
-                key=lambda stage: (
-                    stage.resource_key != current_resource,
-                    stage.ordinal,
-                )
-            )
-            stage = ready[0]
-            pending.remove(stage)
+        while (selected := graph.next(graph_state)) is not None:
+            stage = selected.prepared
             inputs = tuple(
                 artifacts[name] for name in stage.input_instances
             )
             try:
                 if (
-                    current_resource is not None
-                    and stage.resource_key != current_resource
+                    loaded_resource is not None
+                    and stage.resource_key != loaded_resource
                     and hasattr(self.runtime, "release")
                 ):
                     self.runtime.release()
+                    loaded_resource = None
                 artifact, disposition, attempt = self._execute_stage(
                     plan=resolved,
                     stage=stage,
@@ -650,44 +627,46 @@ class ExperimentRuns:
                         resumed.append(attempt)
                     else:
                         created.append(attempt)
-                current_resource = stage.resource_key
+                    loaded_resource = stage.resource_key
+                transition = graph.record(
+                    graph_state,
+                    selected,
+                    RunOutcome.SUCCEEDED,
+                )
             except (ArtifactIntegrityError, AttemptConflictError):
                 raise
             except Exception:
-                failed.add(stage.instance_name)
                 if hasattr(self.runtime, "release"):
                     self.runtime.release()
-                if not keep_going:
-                    dependency_failures = failed | blocked
-                    changed = True
-                    while changed:
-                        changed = False
-                        for item in pending:
-                            if (
-                                item.instance_name not in dependency_failures
-                                and any(
-                                    name in dependency_failures
-                                    for name in item.input_instances
-                                )
-                            ):
-                                dependency_failures.add(item.instance_name)
-                                changed = True
-                    for item in pending:
-                        state = (
-                            "blocked"
-                            if item.instance_name in dependency_failures
-                            else "skipped"
-                        )
-                        if state == "blocked":
-                            blocked.add(item.instance_name)
-                        else:
-                            skipped.add(item.instance_name)
-                        self.workspace.set_plan_stage_state(
-                            resolved.plan_digest,
-                            item.instance_name,
-                            state,
-                        )
-                    break
+                loaded_resource = None
+                transition = graph.record(
+                    graph_state,
+                    selected,
+                    RunOutcome.FAILED,
+                    continuation=(
+                        Continuation.CONTINUE
+                        if keep_going
+                        else Continuation.STOP
+                    ),
+                )
+
+            classified = transition.classified
+            failed.update(classified.failed)
+            blocked.update(classified.blocked)
+            skipped.update(classified.skipped)
+            for instance_name in classified.blocked:
+                self.workspace.set_plan_stage_state(
+                    resolved.plan_digest,
+                    instance_name,
+                    "blocked",
+                )
+            for instance_name in classified.skipped:
+                self.workspace.set_plan_stage_state(
+                    resolved.plan_digest,
+                    instance_name,
+                    "skipped",
+                )
+            graph_state = transition.state
 
         return ExecutionReport(
             plan_digest=resolved.plan_digest,

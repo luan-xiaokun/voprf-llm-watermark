@@ -17,6 +17,7 @@ from .errors import (
 )
 from .identity import identity_for
 from .models import JsonObject, PreparedStage, ResolvedExperimentPlan
+from .plan_graph import ResolvedPlanGraph
 
 
 _TOP_LEVEL_FIELDS = {
@@ -368,7 +369,7 @@ def resolve_plan(
         "stages": [stage.to_dict() for stage in prepared],
     }
     plan_digest = identity_for(resolved_document, prefix="plan")
-    return ResolvedExperimentPlan(
+    resolved = ResolvedExperimentPlan(
         version=source["version"],
         name=source["name"],
         source_path=path,
@@ -378,3 +379,5 @@ def resolve_plan(
         stages=tuple(prepared),
         source=source,
     )
+    ResolvedPlanGraph(resolved)
+    return resolved

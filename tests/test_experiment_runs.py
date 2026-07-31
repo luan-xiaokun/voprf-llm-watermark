@@ -19,6 +19,7 @@ from watermark_suite.experiments.adapters import (
     StageExecutionContext,
 )
 from watermark_suite.experiments.identity import identity_for, sha256_file
+from watermark_suite.experiments.cli import _print_check
 from watermark_suite.experiments.models import (
     ArtifactRef,
     AttemptIdentity,
@@ -46,6 +47,7 @@ class FakeStageAdapter:
     def __init__(self) -> None:
         self.crashed: set[tuple[str, int]] = set()
         self.failed: set[tuple[str, int]] = set()
+        self.prepared: list[str] = []
 
     def resolve(
         self, settings: JsonObject, context: ResolutionContext
@@ -84,6 +86,7 @@ class FakeStageAdapter:
         return replace(definition, semantic_settings=semantic)
 
     def prepare(self, context: StageExecutionContext) -> "FakeExecution":
+        self.prepared.append(context.stage_name)
         return FakeExecution(context, self)
 
 
@@ -557,6 +560,39 @@ def test_new_attempt_keeps_first_success_canonical(tmp_path):
         first_manifest["artifact_identity"]
     )
     assert first.finalized_artifacts[0] != second.finalized_artifacts[0]
+
+
+def test_check_and_run_share_plan_execution_order(tmp_path, capsys):
+    adapter = FakeStageAdapter()
+    plan_path = write_plan(
+        tmp_path / "plan.yaml",
+        {
+            "root-a": {"kind": "fake", "value": "model-a"},
+            "root-b": {"kind": "fake", "value": "model-b"},
+            "follow-a": {
+                "kind": "fake",
+                "input": "root-a",
+                "value": "model-a",
+            },
+        },
+    )
+    runs = experiment_runs(
+        tmp_path,
+        tmp_path / "workspace",
+        adapter,
+    )
+    plan = runs.resolve(plan_path)
+
+    _print_check(plan)
+    check_output = capsys.readouterr().out
+    runs.execute(plan)
+
+    expected = ["root-a", "follow-a", "root-b"]
+    assert adapter.prepared == expected
+    positions = [
+        check_output.index(f"{name} (fake)") for name in expected
+    ]
+    assert positions == sorted(positions)
 
 
 def test_keep_going_runs_independent_stage_after_failure(tmp_path):

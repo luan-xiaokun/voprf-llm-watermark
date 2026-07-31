@@ -8,7 +8,8 @@ from typing import Any
 
 from .engine import ExperimentRuns
 from .errors import ExperimentRunError
-from .models import PreparedStage, ResolvedExperimentPlan
+from .models import ResolvedExperimentPlan
+from .plan_graph import ResolvedPlanGraph
 
 
 def _add_location_options(parser: argparse.ArgumentParser) -> None:
@@ -95,31 +96,6 @@ def _runs(args: argparse.Namespace, *, enforce_clean: bool) -> ExperimentRuns:
     )
 
 
-def _planned_order(plan: ResolvedExperimentPlan) -> list[PreparedStage]:
-    pending = list(plan.stages)
-    completed: set[str] = set()
-    ordered: list[PreparedStage] = []
-    current_resource: str | None = None
-    while pending:
-        ready = [
-            stage
-            for stage in pending
-            if all(name in completed for name in stage.input_instances)
-        ]
-        ready.sort(
-            key=lambda stage: (
-                stage.resource_key != current_resource,
-                stage.ordinal,
-            )
-        )
-        selected = ready[0]
-        pending.remove(selected)
-        ordered.append(selected)
-        completed.add(selected.instance_name)
-        current_resource = selected.resource_key
-    return ordered
-
-
 def _print_check(plan: ResolvedExperimentPlan) -> None:
     print(f"Plan: {plan.name}")
     print(f"Digest: {plan.plan_digest}")
@@ -132,7 +108,8 @@ def _print_check(plan: ResolvedExperimentPlan) -> None:
         print("Implementation: clean")
     print(f"Resolved Runs: {len(plan.stages)}")
     print("Execution order:")
-    for ordinal, stage in enumerate(_planned_order(plan), start=1):
+    graph = ResolvedPlanGraph(plan)
+    for ordinal, stage in enumerate(graph.execution_order, start=1):
         source = (
             " <- " + ", ".join(stage.input_instances)
             if stage.input_instances

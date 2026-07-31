@@ -91,6 +91,16 @@ A description of stage-level Runs, Sweeps, and the Artifact dependencies between
 them. Repeated references to the same Run retain one Run Identity.
 _Avoid_: Run, shell script
 
+**Resolved Experiment Plan**:
+An Experiment Plan whose defaults and Sweeps have been expanded into uniquely
+named, independently executable Runs with explicit Artifact dependencies.
+_Avoid_: Raw plan, YAML plan
+
+**Plan Execution Order**:
+The deterministic order promised for the Runs of an Experiment Plan when their
+dependencies succeed. Plan inspection and execution must report the same order.
+_Avoid_: Preview order, incidental order
+
 **Experiment Workspace**:
 The managed local home of Run and Attempt history, Artifacts, resolved Experiment
 Plans, and execution logs.

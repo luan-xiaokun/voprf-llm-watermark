@@ -40,6 +40,14 @@ Stages skipped because of a failed dependency are persisted as `blocked` in
 SQLite; independent stages not run because of fail-fast are persisted as
 `skipped`. Both are reported by `status`.
 
+The Resolved Experiment Plan owns one canonical Plan Execution Order. Both
+`check` and `run` consume that order from the same in-process graph module.
+Canonical Artifact reuse and resumed or new Attempts do not change it. With
+`--keep-going`, failure removes blocked descendants but does not reorder
+independent Runs: actual execution remains a subsequence of the canonical
+order. Graph traversal state is immutable and in-memory; Workspace Run,
+Attempt, Artifact, and checkpoint records remain the restart authority.
+
 The first successful Artifact for a Run is canonical. A repeat invocation
 reuses it. To deliberately execute the same Run again:
 

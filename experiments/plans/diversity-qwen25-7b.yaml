@@ -90,3 +90,13 @@ stages:
     reference_field: null
     target_field: generated_text
     group_field: source_sample_id
+
+  assemble_diversity:
+    kind: result-aggregation
+    inputs:
+      - evaluate_diversity
+    recipe: diversity
+    confidence_level: 0.95
+    threshold_policy:
+      default: 0.00001
+      rdf: 0.01

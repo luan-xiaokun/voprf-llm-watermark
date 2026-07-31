@@ -77,7 +77,7 @@ def source_artifact(
     return ArtifactRef(
         identity=ArtifactIdentity("artifact_source"),
         path=path,
-        schema_revision="generated-text-v2",
+        schema_revision="generated-text-v3",
         run_identity=RunIdentity("run_source"),
         attempt_identity=AttemptIdentity("attempt_source"),
         manifest={

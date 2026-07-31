@@ -5,16 +5,13 @@ import json
 import pytest
 
 from watermark_suite.experiments.errors import ResolutionError
+from watermark_suite.experiments.dataset_prompt import DATASET_PROMPTS
 from watermark_suite.experiments.runtime import (
     LocalModelRuntime,
     verify_model_materials,
 )
 from watermark_suite.experiments.scheme_registry import WATERMARK_SCHEMES
-from watermark_suite.experiments.stages.common import (
-    load_selected_samples,
-    resolve_dataset,
-    resolve_model,
-)
+from watermark_suite.experiments.stages.common import resolve_model
 
 
 def test_selected_sample_id_cannot_be_overridden_by_source_record(tmp_path):
@@ -30,20 +27,20 @@ def test_selected_sample_id_cannot_be_overridden_by_source_record(tmp_path):
         + "\n",
         encoding="utf-8",
     )
-    spec = resolve_dataset(
+    population = DATASET_PROMPTS.resolve(
         {
             "kind": "c4",
             "format": "jsonl",
             "path": str(dataset_path),
         },
-        datasets={},
+        catalog={},
         repository=tmp_path,
-        num_samples=1,
+        sample_num=1,
     )
 
-    samples = load_selected_samples(spec)
+    samples = DATASET_PROMPTS.materialize(population).samples
 
-    assert samples[0]["sample_id"] == "c4:7"
+    assert samples[0].sample_id == "c4:7"
 
 
 def test_local_model_material_is_reverified_before_runtime_load(tmp_path):

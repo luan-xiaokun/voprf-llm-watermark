@@ -55,7 +55,7 @@ class PreparedStage:
     execution_settings: JsonObject
     adapter_revision: str
     artifact_schema_revision: str
-    input_instance: str | None
+    input_instances: tuple[str, ...]
     ordinal: int
     resource_key: str
 
@@ -64,7 +64,12 @@ class PreparedStage:
 
     @classmethod
     def from_dict(cls, value: JsonObject) -> "PreparedStage":
-        return cls(**value)
+        return cls(
+            **{
+                **value,
+                "input_instances": tuple(value["input_instances"]),
+            }
+        )
 
 
 @dataclass(frozen=True)

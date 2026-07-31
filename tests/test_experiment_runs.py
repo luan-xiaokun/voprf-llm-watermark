@@ -238,9 +238,129 @@ def test_resolve_materializes_defaults_sweep_and_setting_sources(tmp_path):
         stage.setting_sources["batch_size"] == "plan.defaults"
         for stage in plan.stages
     )
-    assert {stage.input_instance for stage in derived} == {
-        stage.instance_name for stage in roots
+    assert {stage.input_instances for stage in derived} == {
+        (stage.instance_name,) for stage in roots
     }
+
+
+def test_plural_inputs_collect_all_swept_instances_once(tmp_path):
+    adapter = FakeStageAdapter()
+    plan_path = write_plan(
+        tmp_path / "plan.yaml",
+        {
+            "left": {
+                "kind": "fake",
+                "value": "left",
+                "sweep": {"value": ["left-1", "left-2"]},
+            },
+            "right": {
+                "kind": "fake",
+                "value": "right",
+                "sweep": {"value": ["right-1", "right-2"]},
+            },
+            "collect": {
+                "kind": "fake",
+                "inputs": ["left", "right"],
+                "value": "collect",
+            },
+        },
+    )
+    workspace = tmp_path / "workspace"
+    runs = experiment_runs(tmp_path, workspace, adapter)
+
+    plan = runs.resolve(plan_path)
+    collector = next(
+        stage for stage in plan.stages if stage.stage_name == "collect"
+    )
+    report = runs.execute(plan)
+    collector_manifest = next(
+        manifest
+        for manifest in artifact_manifests(workspace)
+        if manifest["instance_name"] == "collect"
+    )
+
+    assert len(
+        [stage for stage in plan.stages if stage.stage_name == "collect"]
+    ) == 1
+    assert collector.input_instances == tuple(
+        stage.instance_name
+        for stage in plan.stages
+        if stage.stage_name in {"left", "right"}
+    )
+    assert report.succeeded
+    assert len(collector_manifest["source_artifacts"]) == 4
+
+
+def test_plan_rejects_ambiguous_or_duplicate_plural_inputs(tmp_path):
+    adapter = FakeStageAdapter()
+    runs = experiment_runs(
+        tmp_path,
+        tmp_path / "workspace",
+        adapter,
+    )
+    ambiguous = write_plan(
+        tmp_path / "ambiguous.yaml",
+        {
+            "source": {"kind": "fake", "value": "source"},
+            "collect": {
+                "kind": "fake",
+                "input": "source",
+                "inputs": ["source"],
+                "value": "collect",
+            },
+        },
+    )
+    duplicate = write_plan(
+        tmp_path / "duplicate.yaml",
+        {
+            "source": {"kind": "fake", "value": "source"},
+            "collect": {
+                "kind": "fake",
+                "inputs": ["source", "source"],
+                "value": "collect",
+            },
+        },
+    )
+
+    with pytest.raises(Exception, match="both input and inputs"):
+        runs.resolve(ambiguous)
+    with pytest.raises(Exception, match="non-empty list of unique"):
+        runs.resolve(duplicate)
+
+
+def test_run_identity_is_scoped_to_adapter_not_repository_revision(tmp_path):
+    adapter = FakeStageAdapter()
+    runs = experiment_runs(
+        tmp_path,
+        tmp_path / "workspace",
+        adapter,
+    )
+    plan = runs.resolve(
+        write_plan(
+            tmp_path / "plan.yaml",
+            {"root": {"kind": "fake", "value": "stable"}},
+        )
+    )
+    stage = plan.stages[0]
+    definition = runs._definition(stage)
+
+    original = runs._run_identity(plan, stage, definition, ())[0]
+    other_revision = runs._run_identity(
+        replace(plan, code_revision="unrelated-commit"),
+        stage,
+        definition,
+        (),
+    )[0]
+    other_adapter = replace(stage, adapter_revision="fake-v2")
+    changed_adapter = runs._run_identity(
+        plan,
+        other_adapter,
+        runs._definition(other_adapter),
+        (),
+    )[0]
+
+    assert original == other_revision
+    assert original != changed_adapter
 
 
 def test_execute_reuses_canonical_and_preserves_lineage(tmp_path):

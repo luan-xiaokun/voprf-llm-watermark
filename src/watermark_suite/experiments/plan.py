@@ -27,7 +27,7 @@ _TOP_LEVEL_FIELDS = {
     "defaults",
     "stages",
 }
-_STAGE_CONTROL_FIELDS = {"name", "kind", "input", "sweep"}
+_STAGE_CONTROL_FIELDS = {"name", "kind", "input", "inputs", "sweep"}
 _IMPLEMENTATION_PATHS = (
     "src/watermark_suite",
     "voprf-py",
@@ -122,8 +122,23 @@ def _validate_source(source: JsonObject, adapters: Mapping[str, StageAdapter]) -
             kind = stage.get("kind")
             if kind not in adapters:
                 errors.append(f"stage {stage_name!r} has unknown kind {kind!r}")
+            if "input" in stage and "inputs" in stage:
+                errors.append(
+                    f"stage {stage_name!r} cannot declare both input and inputs"
+                )
             if "input" in stage and not isinstance(stage["input"], str):
                 errors.append(f"stage {stage_name!r} input must be a stage name")
+            inputs = stage.get("inputs")
+            if inputs is not None and (
+                not isinstance(inputs, list)
+                or not inputs
+                or any(not isinstance(item, str) or not item for item in inputs)
+                or len(inputs) != len(set(inputs))
+            ):
+                errors.append(
+                    f"stage {stage_name!r} inputs must be a non-empty list "
+                    "of unique stage names"
+                )
             sweep = stage.get("sweep", {})
             if not isinstance(sweep, dict):
                 errors.append(f"stage {stage_name!r} sweep must be a mapping")
@@ -139,8 +154,12 @@ def _topological_stage_names(stages: JsonObject) -> list[str]:
     order = {name: index for index, name in enumerate(stages)}
     dependencies: dict[str, set[str]] = {name: set() for name in stages}
     for name, stage in stages.items():
-        input_name = stage.get("input")
-        if input_name is not None:
+        input_names = (
+            [stage["input"]]
+            if "input" in stage
+            else stage.get("inputs", [])
+        )
+        for input_name in input_names:
             if input_name not in stages:
                 raise PlanValidationError(
                     f"stage {name!r} references unknown input stage {input_name!r}"
@@ -264,11 +283,24 @@ def resolve_plan(
                 )
         assignments = _sweep_assignments(sweep)
         input_stage = stage_source.get("input")
-        upstream_instances: list[PreparedStage | None] = (
-            prepared_by_stage[input_stage] if input_stage else [None]
-        )
+        collected_stages = stage_source.get("inputs")
+        if input_stage is not None:
+            upstream_groups = [
+                (upstream,)
+                for upstream in prepared_by_stage[input_stage]
+            ]
+        elif collected_stages is not None:
+            upstream_groups = [
+                tuple(
+                    upstream
+                    for name in collected_stages
+                    for upstream in prepared_by_stage[name]
+                )
+            ]
+        else:
+            upstream_groups = [()]
         stage_instances: list[PreparedStage] = []
-        for upstream in upstream_instances:
+        for upstreams in upstream_groups:
             for assignment in assignments:
                 settings = deepcopy(base_settings)
                 settings.update(deepcopy(assignment))
@@ -281,11 +313,13 @@ def resolve_plan(
                     {
                         "stage": stage_name,
                         "settings": definition.settings,
-                        "input": upstream.instance_name if upstream else None,
+                        "inputs": [
+                            upstream.instance_name for upstream in upstreams
+                        ],
                     },
                     prefix="instance",
                 )
-                expanded = len(assignments) * len(upstream_instances) > 1
+                expanded = len(assignments) * len(upstream_groups) > 1
                 instance_name = (
                     f"{stage_name}[{expansion_identity[-10:]}]"
                     if expanded
@@ -311,7 +345,9 @@ def resolve_plan(
                     artifact_schema_revision=(
                         definition.artifact_schema_revision
                     ),
-                    input_instance=upstream.instance_name if upstream else None,
+                    input_instances=tuple(
+                        upstream.instance_name for upstream in upstreams
+                    ),
                     ordinal=ordinal,
                     resource_key=definition.resource_key,
                 )

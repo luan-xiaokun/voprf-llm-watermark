@@ -9,16 +9,14 @@ from ..adapters import (
     ResolvedStageDefinition,
     StageExecutionContext,
 )
+from ..dataset_prompt import DATASET_PROMPTS, PromptSample
 from ..errors import PlanValidationError
 from ..identity import derived_seed, identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
 from ..scheme_registry import WATERMARK_SCHEMES
 from .common import (
     batches,
-    format_prompt,
-    load_selected_samples,
     require,
-    resolve_dataset,
     resolve_model,
     validate_execution_settings,
 )
@@ -26,7 +24,7 @@ from .common import (
 
 class GenerationStageAdapter:
     kind = "generation"
-    revision = "generation-v2"
+    revision = "generation-v3"
     accepted_settings = {
         "model",
         "dataset",
@@ -76,19 +74,18 @@ class GenerationStageAdapter:
             models=context.models,
             repository=context.repository,
         )
-        dataset = resolve_dataset(
+        prompt_population = DATASET_PROMPTS.resolve(
             settings["dataset"],
-            datasets=context.datasets,
+            catalog=context.datasets,
             repository=context.repository,
-            num_samples=settings["num_samples"],
+            sample_num=settings["num_samples"],
         )
         watermark = WATERMARK_SCHEMES.resolve(
             settings["watermark"], context.repository
         )
         semantic = {
             "model": model,
-            "dataset": dataset,
-            "sample_manifest": dataset["selection"],
+            "prompt_population": prompt_population.to_dict(),
             "repetitions": settings["repetitions"],
             "batch_size": settings["batch_size"],
             "seed": settings["seed"],
@@ -105,18 +102,21 @@ class GenerationStageAdapter:
                 )
             },
             "watermark": watermark,
-            "prompt_revision": "c4-or-eli5-v1",
         }
         execution = {
             "device": settings["device"],
             "dtype": settings["dtype"],
         }
-        resolved = {**settings, "model": model, "dataset": dataset}
+        resolved = {
+            **settings,
+            "model": model,
+            "dataset": prompt_population.to_dict(),
+        }
         return ResolvedStageDefinition(
             settings=resolved,
             semantic_settings=semantic,
             execution_settings=execution,
-            artifact_schema_revision="generated-text-v2",
+            artifact_schema_revision="generated-text-v3",
             resource_key=(
                 f"causal:{model['checkpoint']}@{model['revision']}:"
                 f"{settings['device']}:{settings['dtype']}"
@@ -153,27 +153,15 @@ class _GenerationExecution:
             self.model,
             self.tokenizer,
         )
-        source_samples = load_selected_samples(
-            context.semantic_settings["dataset"]
+        population = DATASET_PROMPTS.materialize(
+            context.semantic_settings["prompt_population"],
+            tokenizer=self.tokenizer,
         )
-        repetitions = context.semantic_settings["repetitions"]
-        self.samples = []
-        for sample in source_samples:
-            source_sample_id = sample["sample_id"]
-            for repetition in range(repetitions):
-                sample_id = (
-                    source_sample_id
-                    if repetitions == 1
-                    else f"{source_sample_id}:repeat:{repetition}"
-                )
-                self.samples.append(
-                    {
-                        **sample,
-                        "sample_id": sample_id,
-                        "source_sample_id": source_sample_id,
-                        "repetition": repetition,
-                    }
-                )
+        self.samples = list(
+            population.repeated(
+                context.semantic_settings["repetitions"]
+            ).samples
+        )
 
     def work_items(self) -> list[WorkItem]:
         result = []
@@ -183,7 +171,7 @@ class _GenerationExecution:
                 self.context.semantic_settings["batch_size"],
             )
         ):
-            sample_ids = tuple(item["sample_id"] for item in batch)
+            sample_ids = tuple(item.sample_id for item in batch)
             identity = identity_for(
                 {"ordinal": ordinal, "sample_ids": sample_ids},
                 prefix="batch",
@@ -199,11 +187,7 @@ class _GenerationExecution:
         return result
 
     def execute(self, item: WorkItem) -> WorkResult:
-        dataset = self.context.semantic_settings["dataset"]
-        prompts = [
-            format_prompt(sample, dataset, self.tokenizer)
-            for sample in item.payload
-        ]
+        samples: list[PromptSample] = item.payload
         generation = self.context.semantic_settings["generation"]
         suppress_tokens = (
             [self.tokenizer.eos_token_id]
@@ -215,7 +199,7 @@ class _GenerationExecution:
         )
         with torch.no_grad():
             texts = self.watermarker(
-                prompts=[model_prompt for _, model_prompt in prompts],
+                prompts=[sample.model_prompt for sample in samples],
                 max_new_tokens=generation["max_new_tokens"],
                 stop_strings=generation["stop_strings"],
                 seed=seed,
@@ -230,24 +214,22 @@ class _GenerationExecution:
         if not isinstance(texts, list):
             texts = [texts]
         records = []
-        for sample, (source_prompt, model_prompt), text in zip(
-            item.payload, prompts, texts
-        ):
+        for sample, text in zip(samples, texts):
             token_num = len(
                 self.tokenizer.encode(text, add_special_tokens=False)
             )
             record = {
-                "sample_id": sample["sample_id"],
-                "source_prompt": source_prompt,
-                "prompt_text": model_prompt,
+                "sample_id": sample.sample_id,
+                "source_prompt": sample.source_prompt,
+                "prompt_text": sample.model_prompt,
                 "generated_text": text,
                 "generated_token_num": token_num,
-                "source_sample_id": sample["source_sample_id"],
-                "repetition": sample["repetition"],
+                "source_sample_id": sample.source_sample_id,
+                "repetition": sample.repetition,
             }
             for field in ("index", "original_index", "url"):
-                if field in sample:
-                    record[field] = sample[field]
+                if field in sample.payload:
+                    record[field] = sample.payload[field]
             records.append(record)
         return WorkResult(records=tuple(records))
 

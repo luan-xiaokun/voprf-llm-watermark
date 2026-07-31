@@ -225,7 +225,7 @@ class ExperimentRuns:
         inputs: tuple[ArtifactRef, ...],
     ) -> tuple[RunIdentity, str]:
         document = {
-            "identity_schema": 2,
+            "identity_schema": 3,
             "kind": stage.kind,
             "adapter_revision": stage.adapter_revision,
             "artifact_schema_revision": definition.artifact_schema_revision,
@@ -236,7 +236,6 @@ class ExperimentRuns:
                 if key in definition.execution_settings
             },
             "source_artifacts": [item.identity.value for item in inputs],
-            "code_revision": plan.code_revision,
         }
         serialized = canonical_json(document)
         return (
@@ -596,7 +595,10 @@ class ExperimentRuns:
 
         while pending:
             for stage in tuple(pending):
-                if stage.input_instance in failed or stage.input_instance in blocked:
+                if any(
+                    name in failed or name in blocked
+                    for name in stage.input_instances
+                ):
                     blocked.add(stage.instance_name)
                     self.workspace.set_plan_stage_state(
                         resolved.plan_digest,
@@ -609,8 +611,9 @@ class ExperimentRuns:
             ready = [
                 stage
                 for stage in pending
-                if stage.input_instance is None
-                or stage.input_instance in artifacts
+                if all(
+                    name in artifacts for name in stage.input_instances
+                )
             ]
             if not ready:
                 raise RuntimeError("no runnable stage remains")
@@ -622,10 +625,8 @@ class ExperimentRuns:
             )
             stage = ready[0]
             pending.remove(stage)
-            inputs = (
-                (artifacts[stage.input_instance],)
-                if stage.input_instance is not None
-                else ()
+            inputs = tuple(
+                artifacts[name] for name in stage.input_instances
             )
             try:
                 if (
@@ -664,7 +665,10 @@ class ExperimentRuns:
                         for item in pending:
                             if (
                                 item.instance_name not in dependency_failures
-                                and item.input_instance in dependency_failures
+                                and any(
+                                    name in dependency_failures
+                                    for name in item.input_instances
+                                )
                             ):
                                 dependency_failures.add(item.instance_name)
                                 changed = True

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from watermark_suite.experiments.dataset_prompt import (
+    DATASET_PROMPTS,
+    ResolvedPromptPopulation,
+)
+from watermark_suite.experiments.identity import identity_for
 from watermark_suite.experiments.plan import resolve_plan
 from watermark_suite.experiments.stages import default_stage_adapters
 
@@ -29,25 +34,61 @@ def _resolve_checkpoint(
     )
 
 
-def _resolve_task_dataset(task: str) -> dict:
-    sample_num = 1319 if task == "gsm8k" else 164
-    return {
-        "name": task,
-        "config": "main" if task == "gsm8k" else None,
-        "split": "test",
-        "sample_num": sample_num,
-        "sample_ids": [f"{task}:{index}" for index in range(sample_num)],
-        "snapshot": f"{task}-snapshot",
+def _resolve_prompt_population(
+    value,
+    *,
+    catalog,
+    repository,
+    sample_num=None,
+) -> ResolvedPromptPopulation:
+    del repository
+    raw = catalog.get(value, value) if isinstance(value, str) else value
+    kind = raw.get("kind") if isinstance(raw, dict) else raw
+    count = sample_num or (1319 if kind == "gsm8k" else 164)
+    parameters = {
+        "num_shots": 4 if kind == "gsm8k" else 0
+    } if kind in {"gsm8k", "humaneval"} else {}
+    policy_document = {
+        "name": f"{kind}-test",
+        "revision": f"{kind}-test-v1",
+        "parameters": parameters,
     }
+    return ResolvedPromptPopulation(
+        kind=kind,
+        dataset={
+            "kind": kind,
+            "split": "test" if kind in {"gsm8k", "humaneval"} else "train",
+            "snapshot": f"{kind}-snapshot",
+            "selection": {
+                "mode": "full",
+                "count": count,
+                "sample_ids": [
+                    f"{kind}:{index}" for index in range(count)
+                ],
+            },
+        },
+        source={"kind": "test"},
+        prompt_policy={
+            **policy_document,
+            "identity": identity_for(
+                policy_document,
+                prefix="prompt-policy",
+            ),
+        },
+        generation=(
+            {"stop_strings": ["Question:"]}
+            if kind == "gsm8k"
+            else {}
+        ),
+    )
 
 
 def resolve(name: str, monkeypatch):
     import watermark_suite.experiments.stages.common as common
-    import watermark_suite.experiments.stages.downstream as downstream
 
     monkeypatch.setattr(common, "_resolve_checkpoint", _resolve_checkpoint)
     monkeypatch.setattr(
-        downstream, "resolve_task_dataset", _resolve_task_dataset
+        DATASET_PROMPTS, "resolve", _resolve_prompt_population
     )
     return resolve_plan(
         PLAN_DIRECTORY / name,
@@ -59,13 +100,15 @@ def resolve(name: str, monkeypatch):
 def test_tpr_token_length_plan_contract(monkeypatch):
     plan = resolve("figure-tpr-vs-token-length.yaml", monkeypatch)
 
-    assert len(plan.stages) == 10
+    assert len(plan.stages) == 11
     generations = [
         stage for stage in plan.stages if stage.kind == "generation"
     ]
     assert len(generations) == 5
     assert all(
-        stage.semantic_settings["dataset"]["selection"]["count"] == 1000
+        stage.semantic_settings["prompt_population"]["dataset"][
+            "selection"
+        ]["count"] == 1000
         for stage in generations
     )
     assert all(
@@ -94,6 +137,12 @@ def test_tpr_token_length_plan_contract(monkeypatch):
     assert detections["detect_rdf"].semantic_settings[
         "significance_levels"
     ] == [0.01]
+    report = next(
+        stage for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 5
+    assert report.semantic_settings["recipe"] == "tpr-vs-token-length"
 
 
 def test_adaptive_forgery_plan_has_1000_samples_and_length_curve(
@@ -109,25 +158,23 @@ def test_adaptive_forgery_plan_has_1000_samples_and_length_curve(
         stage for stage in plan.stages if stage.kind == "detection"
     )
 
-    assert forge.semantic_settings["sample_manifest"]["count"] == 1000
+    assert forge.semantic_settings["prompt_population"]["dataset"][
+        "selection"
+    ]["count"] == 1000
     assert forge.semantic_settings["watermark"]["gamma"] == 0.5
     assert forge.semantic_settings["max_candidates"] == 8
     assert forge.semantic_settings["trace_level"] == "compact"
     assert detection.semantic_settings["step_size"] == 10
     assert 0.00001 in detection.semantic_settings["significance_levels"]
+    report = next(
+        stage for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert report.semantic_settings["recipe"] == "adaptive-forgery"
+    assert len(report.input_instances) == 2
 
 
 def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
-    import watermark_suite.experiments.stages.common as common
-
-    monkeypatch.setattr(
-        common,
-        "_load_dataset_records",
-        lambda spec, limit=None: [
-            {"question": f"question {index}"}
-            for index in range(limit or 500)
-        ],
-    )
     plan = resolve(
         "robustness-qwen25-7b-instruct.yaml",
         monkeypatch,
@@ -137,10 +184,12 @@ def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
         stage for stage in plan.stages if stage.kind == "generation"
     ]
     assert all(
-        stage.semantic_settings["sample_manifest"]["count"] == 1000
+        stage.semantic_settings["prompt_population"]["dataset"][
+            "selection"
+        ]["count"] == 1000
         for stage in generations
     )
-    assert len(plan.stages) == 77
+    assert len(plan.stages) == 78
     assert sum(stage.kind == "robustness" for stage in plan.stages) == 21
     assert sum(stage.kind == "detection" for stage in plan.stages) == 28
     assert sum(
@@ -181,6 +230,11 @@ def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
         )
     ]
     assert len(clean_detection) == 7
+    report = next(
+        stage for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 49
 
 
 def test_diversity_plan_repeats_each_prompt_and_uses_unified_evaluation(
@@ -198,6 +252,12 @@ def test_diversity_plan_repeats_each_prompt_and_uses_unified_evaluation(
 
     assert len(generations) == 7
     assert len(evaluations) == 7
+    reports = [
+        stage for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    ]
+    assert len(reports) == 1
+    assert len(reports[0].input_instances) == 7
     assert all(
         stage.semantic_settings["repetitions"] == 50
         for stage in generations
@@ -213,7 +273,7 @@ def test_tpr_ppl_plan_reuses_shared_generation_semantics(monkeypatch):
     token_plan = resolve("figure-tpr-vs-token-length.yaml", monkeypatch)
     ppl_plan = resolve("figure-tpr-vs-ppl.yaml", monkeypatch)
 
-    assert len(ppl_plan.stages) == 29
+    assert len(ppl_plan.stages) == 30
     token_generation = {
         stage.semantic_settings["watermark"]["method"]: (
             stage.semantic_settings
@@ -255,12 +315,17 @@ def test_tpr_ppl_plan_reuses_shared_generation_semantics(monkeypatch):
         == "Qwen/Qwen2.5-14B"
         for stage in perplexity
     )
+    report = next(
+        stage for stage in ppl_plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 19
 
 
 def test_downstream_plan_contract(monkeypatch):
     plan = resolve("table-downstream-performance.yaml", monkeypatch)
 
-    assert len(plan.stages) == 16
+    assert len(plan.stages) == 17
     gsm8k = [
         stage for stage in plan.stages
         if stage.stage_name == "evaluate_gsm8k"
@@ -270,22 +335,31 @@ def test_downstream_plan_contract(monkeypatch):
         if stage.stage_name == "evaluate_humaneval"
     ]
     assert len(gsm8k) == len(humaneval) == 8
-    assert all(stage.semantic_settings["batch_size"] == 8 for stage in plan.stages)
+    downstream = [
+        stage for stage in plan.stages if stage.kind == "downstream"
+    ]
+    assert all(
+        stage.semantic_settings["batch_size"] == 8 for stage in downstream
+    )
     assert all(
         stage.semantic_settings["max_new_tokens"] == 1024
-        for stage in plan.stages
+        for stage in downstream
     )
     assert all(
         stage.semantic_settings["model"]["checkpoint"]
         == "Qwen/Qwen2.5-7B-Instruct"
-        for stage in plan.stages
+        for stage in downstream
     )
     assert all(
-        stage.semantic_settings["task_evaluation"]["num_shots"] == 4
+        stage.semantic_settings["prompt_population"]["prompt_policy"][
+            "parameters"
+        ]["num_shots"] == 4
         for stage in gsm8k
     )
     assert all(
-        stage.semantic_settings["task_evaluation"]["num_shots"] == 0
+        stage.semantic_settings["prompt_population"]["prompt_policy"][
+            "parameters"
+        ]["num_shots"] == 0
         for stage in humaneval
     )
     methods = {
@@ -306,3 +380,8 @@ def test_downstream_plan_contract(monkeypatch):
         if stage.semantic_settings["watermark"]["method"] == "vow"
     }
     assert vow_deltas == {2.0, 2.5}
+    report = next(
+        stage for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 16

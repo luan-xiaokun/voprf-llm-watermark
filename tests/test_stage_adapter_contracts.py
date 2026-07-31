@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from watermark_suite.experiments.adapters import ResolutionContext
+from watermark_suite.experiments.dataset_prompt import (
+    DATASET_PROMPTS,
+    ResolvedPromptPopulation,
+)
 from watermark_suite.experiments.errors import PlanValidationError
+from watermark_suite.experiments.identity import identity_for
 from watermark_suite.experiments.models import (
     ArtifactIdentity,
     ArtifactRef,
@@ -47,7 +52,9 @@ MODEL = {
 }
 DATASET = {
     "kind": "c4",
-    "selection": {"count": 2, "sample_ids": ["c4:1", "c4:2"]},
+    "split": "train",
+    "snapshot": "dataset-snapshot",
+    "selection": {"count": 2, "sample_ids": ["c4:0", "c4:1"]},
 }
 WATERMARK = {
     "method": "vow",
@@ -59,6 +66,49 @@ WATERMARK = {
     "server_seed_sha256": "seed-digest",
     "naive_baseline": False,
 }
+
+
+def prompt_population(
+    kind: str = "c4",
+    *,
+    count: int = 2,
+) -> ResolvedPromptPopulation:
+    parameters = (
+        {"num_shots": 4 if kind == "gsm8k" else 0}
+        if kind in {"gsm8k", "humaneval"}
+        else {}
+    )
+    policy = {
+        "name": f"{kind}-test",
+        "revision": f"{kind}-test-v1",
+        "parameters": parameters,
+    }
+    return ResolvedPromptPopulation(
+        kind=kind,
+        dataset={
+            "kind": kind,
+            "split": (
+                "test" if kind in {"gsm8k", "humaneval"} else "train"
+            ),
+            "snapshot": "dataset-snapshot",
+            "selection": {
+                "count": count,
+                "sample_ids": [
+                    f"{kind}:{index}" for index in range(count)
+                ],
+            },
+        },
+        source={"kind": "test"},
+        prompt_policy={
+            **policy,
+            "identity": identity_for(policy, prefix="prompt-policy"),
+        },
+        generation=(
+            {"stop_strings": ["Question:"]}
+            if kind == "gsm8k"
+            else {}
+        ),
+    )
 
 
 def context(tmp_path: Path) -> ResolutionContext:
@@ -97,7 +147,9 @@ def test_generation_contract_resolves_model_dataset_and_watermark(
 
     monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
     monkeypatch.setattr(
-        module, "resolve_dataset", lambda *args, **kwargs: DATASET
+        DATASET_PROMPTS,
+        "resolve",
+        lambda *args, **kwargs: prompt_population(),
     )
     monkeypatch.setattr(
         module.WATERMARK_SCHEMES,
@@ -128,7 +180,7 @@ def test_generation_contract_resolves_model_dataset_and_watermark(
     )
 
     assert resolved.semantic_settings["model"] == MODEL
-    assert resolved.semantic_settings["sample_manifest"] == DATASET["selection"]
+    assert resolved.semantic_settings["prompt_population"]["dataset"] == DATASET
     assert resolved.semantic_settings["watermark"] == WATERMARK
     assert resolved.execution_settings == {
         "device": "cuda",
@@ -143,7 +195,9 @@ def test_adaptive_contract_excludes_irrelevant_delta_from_run_semantics(
 
     monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
     monkeypatch.setattr(
-        module, "resolve_dataset", lambda *args, **kwargs: DATASET
+        DATASET_PROMPTS,
+        "resolve",
+        lambda *args, **kwargs: prompt_population(),
     )
     monkeypatch.setattr(
         module.WATERMARK_SCHEMES,
@@ -197,7 +251,7 @@ def test_detection_contract_derives_watermark_and_tokenizer_from_source():
     source = ArtifactRef(
         identity=ArtifactIdentity("artifact_source"),
         path=Path("/artifact"),
-        schema_revision="generated-text-v2",
+        schema_revision="generated-text-v3",
         run_identity=RunIdentity("run_source"),
         attempt_identity=AttemptIdentity("attempt_source"),
         manifest={
@@ -256,11 +310,17 @@ def test_detection_summary_aggregates_actual_milestones():
             "token_num": 5,
             "eligible_sample_num": 2,
             "detection_rate": {"1e-05": 0.0},
+            "detection_counts": {
+                "1e-05": {"positive_num": 0, "sample_num": 2}
+            },
         },
         {
             "token_num": 10,
             "eligible_sample_num": 1,
             "detection_rate": {"1e-05": 1.0},
+            "detection_counts": {
+                "1e-05": {"positive_num": 1, "sample_num": 1}
+            },
         },
     ]
 
@@ -290,7 +350,7 @@ def test_perplexity_contract_uses_evaluator_model_tokenizer(
     source = ArtifactRef(
         identity=ArtifactIdentity("artifact_source"),
         path=Path("/artifact"),
-        schema_revision="generated-text-v2",
+        schema_revision="generated-text-v3",
         run_identity=RunIdentity("run_source"),
         attempt_identity=AttemptIdentity("attempt_source"),
         manifest={"semantic_settings": {"watermark": WATERMARK}},
@@ -305,14 +365,6 @@ def test_downstream_contract_pins_full_task_and_greedy_decoding(
 ):
     import watermark_suite.experiments.stages.downstream as module
 
-    task_dataset = {
-        "name": "openai/gsm8k",
-        "config": "main",
-        "split": "test",
-        "sample_num": 1319,
-        "sample_ids": ["gsm8k:0"],
-        "snapshot": "dataset_snapshot",
-    }
     monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
     monkeypatch.setattr(
         module.WATERMARK_SCHEMES,
@@ -320,7 +372,9 @@ def test_downstream_contract_pins_full_task_and_greedy_decoding(
         lambda *args, **kwargs: WATERMARK,
     )
     monkeypatch.setattr(
-        module, "resolve_task_dataset", lambda task: task_dataset
+        DATASET_PROMPTS,
+        "resolve",
+        lambda *args, **kwargs: prompt_population("gsm8k", count=1319),
     )
 
     resolved = DownstreamStageAdapter().resolve(
@@ -340,12 +394,14 @@ def test_downstream_contract_pins_full_task_and_greedy_decoding(
         context(tmp_path),
     )
 
-    assert resolved.semantic_settings["dataset"] == task_dataset
+    assert resolved.semantic_settings["prompt_population"]["kind"] == "gsm8k"
     assert resolved.semantic_settings["decoding"] == {
         "do_sample": False,
         "num_beams": 1,
     }
-    assert resolved.semantic_settings["task_evaluation"]["num_shots"] == 4
+    assert resolved.semantic_settings["prompt_population"]["prompt_policy"][
+        "parameters"
+    ]["num_shots"] == 4
     assert "execution_timeout" not in resolved.semantic_settings[
         "task_evaluation"
     ]
@@ -363,12 +419,6 @@ def test_downstream_contract_rejects_wrong_shot_count(
         "resolve",
         lambda *args, **kwargs: WATERMARK,
     )
-    monkeypatch.setattr(
-        module,
-        "resolve_task_dataset",
-        lambda task: {"sample_num": 164},
-    )
-
     with pytest.raises(PlanValidationError, match="num_shots=0"):
         DownstreamStageAdapter().resolve(
             {

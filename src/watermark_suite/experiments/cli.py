@@ -104,8 +104,7 @@ def _planned_order(plan: ResolvedExperimentPlan) -> list[PreparedStage]:
         ready = [
             stage
             for stage in pending
-            if stage.input_instance is None
-            or stage.input_instance in completed
+            if all(name in completed for name in stage.input_instances)
         ]
         ready.sort(
             key=lambda stage: (
@@ -135,8 +134,8 @@ def _print_check(plan: ResolvedExperimentPlan) -> None:
     print("Execution order:")
     for ordinal, stage in enumerate(_planned_order(plan), start=1):
         source = (
-            f" <- {stage.input_instance}"
-            if stage.input_instance is not None
+            " <- " + ", ".join(stage.input_instances)
+            if stage.input_instances
             else ""
         )
         print(

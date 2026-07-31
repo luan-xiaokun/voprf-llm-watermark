@@ -240,6 +240,9 @@ def test_adaptive_forgery_curve_combines_cost_pvalue_and_asr():
             "mean_selected_green_ratio": 0.0,
             "median_p_value": 0.15000000000000002,
             "attack_success_rate": {"1e-05": 0.0},
+            "attack_success_counts": {
+                "1e-05": {"positive_num": 0, "sample_num": 2}
+            },
         },
         {
             "token_num": 4,
@@ -251,6 +254,9 @@ def test_adaptive_forgery_curve_combines_cost_pvalue_and_asr():
             "mean_selected_green_ratio": 0.75,
             "median_p_value": 0.0050005,
             "attack_success_rate": {"1e-05": 0.5},
+            "attack_success_counts": {
+                "1e-05": {"positive_num": 1, "sample_num": 2}
+            },
         },
     ]
 

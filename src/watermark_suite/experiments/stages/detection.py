@@ -152,6 +152,15 @@ def adaptive_forgery_curve(
                 )
                 for level in significance_levels
             },
+            "attack_success_counts": {
+                f"{level:.0e}": {
+                    "positive_num": sum(
+                        value["p_value"] < level for value in values
+                    ),
+                    "sample_num": len(values),
+                }
+                for level in significance_levels
+            },
         }
         for token_num, values in sorted(by_milestone.items())
     ]
@@ -159,7 +168,7 @@ def adaptive_forgery_curve(
 
 class DetectionStageAdapter:
     kind = "detection"
-    revision = "detection-v2"
+    revision = "detection-v3"
     accepted_settings = {
         "batch_size",
         "target_field",
@@ -202,7 +211,7 @@ class DetectionStageAdapter:
             settings=dict(settings),
             semantic_settings=semantic,
             execution_settings={"device": settings["device"]},
-            artifact_schema_revision="watermark-detection-v2",
+            artifact_schema_revision="watermark-detection-v3",
             resource_key="input-bound:detection",
         )
 
@@ -415,6 +424,13 @@ class _DetectionExecution:
             )
             for level in levels
         }
+        counts = {
+            f"{level:.0e}": {
+                "positive_num": sum(value < level for value in p_values),
+                "sample_num": len(p_values),
+            }
+            for level in levels
+        }
         rate_name = (
             "tpr"
             if self.context.semantic_settings["watermark"]["enabled"]
@@ -434,6 +450,7 @@ class _DetectionExecution:
                 ]
             ),
             "detection_rate": rates,
+            "detection_counts": counts,
             rate_name: rates,
             "total_token_num": total_tokens,
             "mean_token_num": (
@@ -459,6 +476,15 @@ class _DetectionExecution:
                             sum(value < level for value in values)
                             / len(values)
                         )
+                        for level in levels
+                    },
+                    "detection_counts": {
+                        f"{level:.0e}": {
+                            "positive_num": sum(
+                                value < level for value in values
+                            ),
+                            "sample_num": len(values),
+                        }
                         for level in levels
                     },
                 }

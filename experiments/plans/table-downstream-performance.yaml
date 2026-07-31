@@ -100,3 +100,14 @@ stages:
         - *upv
         - *vow_delta_2_5
         - *vow_delta_2_0
+
+  assemble_downstream_performance:
+    kind: result-aggregation
+    inputs:
+      - evaluate_gsm8k
+      - evaluate_humaneval
+    recipe: downstream-performance
+    confidence_level: 0.95
+    threshold_policy:
+      default: 0.00001
+      rdf: 0.01

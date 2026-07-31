@@ -149,3 +149,15 @@ stages:
     max_length: 2048
     prompt_field: prompt_text
     target_field: generated_text
+
+  assemble_tpr_vs_ppl:
+    kind: result-aggregation
+    inputs:
+      - detect_watermarked
+      - evaluate_watermarked_ppl
+      - evaluate_unwatermarked_ppl
+    recipe: tpr-vs-ppl
+    confidence_level: 0.95
+    threshold_policy:
+      default: 0.00001
+      rdf: 0.01

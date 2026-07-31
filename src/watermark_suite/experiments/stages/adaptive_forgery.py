@@ -20,16 +20,14 @@ from ..adapters import (
     ResolvedStageDefinition,
     StageExecutionContext,
 )
+from ..dataset_prompt import DATASET_PROMPTS, PromptSample
 from ..errors import PlanValidationError
 from ..identity import derived_seed, identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
 from ..scheme_registry import WATERMARK_SCHEMES
 from .common import (
     batches,
-    format_prompt,
-    load_selected_samples,
     require,
-    resolve_dataset,
     resolve_model,
     validate_execution_settings,
 )
@@ -333,7 +331,7 @@ def build_summary(
 
 class AdaptiveForgeryStageAdapter:
     kind = "adaptive-forgery"
-    revision = "adaptive-forgery-v1"
+    revision = "adaptive-forgery-v2"
     accepted_settings = {
         "model",
         "dataset",
@@ -371,11 +369,11 @@ class AdaptiveForgeryStageAdapter:
             models=context.models,
             repository=context.repository,
         )
-        dataset = resolve_dataset(
+        prompt_population = DATASET_PROMPTS.resolve(
             settings["dataset"],
-            datasets=context.datasets,
+            catalog=context.datasets,
             repository=context.repository,
-            num_samples=settings["num_samples"],
+            sample_num=settings["num_samples"],
         )
         watermark = WATERMARK_SCHEMES.resolve(
             settings["watermark"], context.repository
@@ -401,8 +399,7 @@ class AdaptiveForgeryStageAdapter:
         }
         semantic = {
             "model": model,
-            "dataset": dataset,
-            "sample_manifest": dataset["selection"],
+            "prompt_population": prompt_population.to_dict(),
             "batch_size": settings["batch_size"],
             "seed": settings["seed"],
             "max_new_tokens": settings["max_new_tokens"],
@@ -410,17 +407,20 @@ class AdaptiveForgeryStageAdapter:
             "watermark": oracle,
             "allow_special_tokens": settings["allow_special_tokens"],
             "trace_level": settings["trace_level"],
-            "prompt_revision": "c4-or-eli5-v1",
         }
         execution = {
             "device": settings["device"],
             "dtype": settings["dtype"],
         }
         return ResolvedStageDefinition(
-            settings={**settings, "model": model, "dataset": dataset},
+            settings={
+                **settings,
+                "model": model,
+                "dataset": prompt_population.to_dict(),
+            },
             semantic_settings=semantic,
             execution_settings=execution,
-            artifact_schema_revision="adaptive-forgery-v1",
+            artifact_schema_revision="adaptive-forgery-v2",
             resource_key=(
                 f"causal:{model['checkpoint']}@{model['revision']}:"
                 f"{settings['device']}:{settings['dtype']}"
@@ -472,7 +472,12 @@ class _AdaptiveForgeryExecution:
             window_size=watermark["window_size"],
             max_candidates=semantic["max_candidates"],
         )
-        self.samples = load_selected_samples(semantic["dataset"])
+        self.samples = list(
+            DATASET_PROMPTS.materialize(
+                semantic["prompt_population"],
+                tokenizer=self.tokenizer,
+            ).samples
+        )
 
     def work_items(self) -> list[WorkItem]:
         result = []
@@ -482,7 +487,7 @@ class _AdaptiveForgeryExecution:
                 self.context.semantic_settings["batch_size"],
             )
         ):
-            sample_ids = tuple(item["sample_id"] for item in batch)
+            sample_ids = tuple(item.sample_id for item in batch)
             identity = identity_for(
                 {"ordinal": ordinal, "sample_ids": sample_ids},
                 prefix="batch",
@@ -500,16 +505,14 @@ class _AdaptiveForgeryExecution:
     def execute(self, item: WorkItem) -> WorkResult:
         semantic = self.context.semantic_settings
         records = []
-        for sample in item.payload:
+        samples: list[PromptSample] = item.payload
+        for sample in samples:
             sample_seed = derived_seed(
-                semantic["seed"], sample["sample_id"]
+                semantic["seed"], sample.sample_id
             )
             set_seed(sample_seed)
-            source_prompt, model_prompt = format_prompt(
-                sample, semantic["dataset"], self.tokenizer
-            )
             result = self.forger.forge(
-                prompt=model_prompt,
+                prompt=sample.model_prompt,
                 max_new_tokens=semantic["max_new_tokens"],
                 suppress_token_ids=(
                     None
@@ -520,9 +523,9 @@ class _AdaptiveForgeryExecution:
             )
             records.append(
                 {
-                    "sample_id": sample["sample_id"],
-                    "source_prompt": source_prompt,
-                    "prompt_text": model_prompt,
+                    "sample_id": sample.sample_id,
+                    "source_prompt": sample.source_prompt,
+                    "prompt_text": sample.model_prompt,
                     "generated_text": result.text,
                     "adaptive_forgery": result.to_dict(
                         trace_level=semantic["trace_level"]

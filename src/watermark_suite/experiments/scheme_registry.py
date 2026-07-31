@@ -21,7 +21,7 @@ from watermark_suite.schemes.upv import UPVAdapter, UPVDetector
 from watermark_suite.schemes.vow.key import get_server_seed
 
 from .errors import PlanValidationError, ResolutionError
-from .identity import sha256_file
+from .identity import identity_for, sha256_file
 from .models import JsonObject
 
 
@@ -441,6 +441,47 @@ class WatermarkSchemeRegistry:
         if value.get("method") != "vow":
             raise PlanValidationError("VOW seed requested for another scheme")
         return _vow_seed(value)
+
+    def analysis_dimensions(self, value: JsonObject) -> JsonObject:
+        """Return stable scientific axes without local material paths."""
+
+        method = value.get("method")
+        fields = {
+            "none": (),
+            "vow": ("window_size", "gamma", "delta", "naive_baseline"),
+            "lefthash": ("gamma", "delta"),
+            "selfhash": ("gamma", "delta"),
+            "rdf": ("length", "seed", "n_runs"),
+            "pdw": (
+                "signature_segment_length",
+                "bit_size",
+                "message_length",
+                "max_planted_errors",
+                "seed",
+            ),
+            "upv": (
+                "window_size",
+                "gamma",
+                "delta",
+                "bit_number",
+                "layers",
+                "beam_size",
+            ),
+        }
+        if method not in fields:
+            raise PlanValidationError(
+                f"unknown resolved watermark method {method!r}"
+            )
+        parameters = {
+            field: value[field]
+            for field in fields[method]
+            if field in value
+        }
+        document = {"method": method, "parameters": parameters}
+        return {
+            **document,
+            "identity": identity_for(document, prefix="scheme"),
+        }
 
     def _definition(self, value: JsonObject) -> _SchemeDefinition:
         method = value.get("method")

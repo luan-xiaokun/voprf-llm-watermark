@@ -123,10 +123,10 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
         stage.semantic_settings["watermark"]["method"] == "none"
         for stage in generations
     ) == 1
-    assert sum(stage.kind == "robustness" for stage in plan.stages) == 23
-    assert sum(stage.kind == "detection" for stage in plan.stages) == 31
-    assert sum(stage.kind == "text-evaluation" for stage in plan.stages) == 23
-    assert len(plan.stages) == 87
+    assert sum(stage.kind == "robustness" for stage in plan.stages) == 24
+    assert sum(stage.kind == "detection" for stage in plan.stages) == 32
+    assert sum(stage.kind == "text-evaluation" for stage in plan.stages) == 24
+    assert len(plan.stages) == 90
 
     negative_detections = [
         stage
@@ -171,20 +171,20 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
         for stage in plan.stages
         if stage.stage_name == "transform_pdw_robustness"
     ]
-    assert len(pdw_attacks) == 2
+    assert len(pdw_attacks) == 3
     assert {
         stage.semantic_settings["transformation"].get("model")
         for stage in pdw_attacks
         if stage.semantic_settings["transformation"]["method"]
         == "openai-paraphrase"
-    } == {"gpt-3.5-turbo-0125"}
+    } == {"gpt-3.5-turbo-0125", "gpt-5.6-luna"}
 
     report = next(
         stage
         for stage in plan.stages
         if stage.kind == "result-aggregation"
     )
-    assert len(report.input_instances) == 54
+    assert len(report.input_instances) == 56
     assert report.semantic_settings["threshold_policy"] == {"default": 0.01}
 
 

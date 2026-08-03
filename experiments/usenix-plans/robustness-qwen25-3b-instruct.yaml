@@ -199,7 +199,6 @@ stages:
         - *gpt35_attack
         - *luna_attack
 
-  # The manuscript deliberately leaves PDW + Luna unmeasured (---).
   transform_pdw_robustness:
     kind: robustness
     input: generate_pdw_robustness
@@ -210,6 +209,7 @@ stages:
       transformation:
         - *synonym_attack
         - *gpt35_attack
+        - *luna_attack
 
   detect_robustness:
     kind: detection

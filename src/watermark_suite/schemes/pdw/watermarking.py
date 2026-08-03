@@ -53,7 +53,7 @@ class PDWAdapter(WatermarkAdapter):
         stop_strings: list[str] | None = None,
         **kwargs,
     ) -> list[str]:
-        sample_type = "multinomial" if do_sample else "argmax"
+        sample_type = "multinomial"
         texts = []
         for prompt in prompts:
             (generated_text, _, pk, params, _, _) = generate_text_asymmetric(

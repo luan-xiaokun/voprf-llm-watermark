@@ -143,3 +143,26 @@ def test_external_watermark_material_is_reverified(method, tmp_path):
 
     with pytest.raises(ResolutionError, match="changed after Plan resolution"):
         WATERMARK_SCHEMES.verify(watermark)
+
+
+def test_pdw_run_semantics_identify_cache_safe_generation(tmp_path):
+    for name in ("sk", "pk", "params"):
+        (tmp_path / name).write_bytes(name.encode())
+
+    watermark = WATERMARK_SCHEMES.resolve(
+        {
+            "method": "pdw",
+            "enabled": True,
+            "sk_path": str(tmp_path / "sk"),
+            "pk_path": str(tmp_path / "pk"),
+            "params_path": str(tmp_path / "params"),
+            "signature_segment_length": 16,
+            "bit_size": 2,
+            "message_length": 8,
+            "max_planted_errors": 2,
+            "seed": 0,
+        },
+        tmp_path,
+    )
+
+    assert watermark["implementation_revision"] == "pdw-cache-safe-v1"

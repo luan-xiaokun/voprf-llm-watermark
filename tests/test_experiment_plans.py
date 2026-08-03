@@ -380,6 +380,22 @@ def test_downstream_plan_contract(monkeypatch):
         if stage.semantic_settings["watermark"]["method"] == "vow"
     }
     assert vow_deltas == {2.0, 2.5}
+    pdw = next(
+        stage
+        for stage in gsm8k
+        if stage.semantic_settings["watermark"]["method"] == "pdw"
+    )
+    assert pdw.semantic_settings["decoding"] == {
+        "do_sample": False,
+        "num_beams": 1,
+        "effective_sampling": "multinomial",
+    }
+    assert all(
+        stage.semantic_settings["decoding"]
+        == {"do_sample": False, "num_beams": 1}
+        for stage in gsm8k
+        if stage.semantic_settings["watermark"]["method"] != "pdw"
+    )
     report = next(
         stage for stage in plan.stages
         if stage.kind == "result-aggregation"

@@ -156,7 +156,7 @@ def _resolve_pdw(value: JsonObject, repository: Path) -> JsonObject:
         raise PlanValidationError(
             "pdw segment, bit, and message lengths must be positive"
         )
-    resolved = dict(value)
+    resolved = {**value, "implementation_revision": "pdw-cache-safe-v1"}
     for field in ("sk_path", "pk_path", "params_path"):
         path, digest = _file(
             value[field], repository, label=f"PDW {field}"

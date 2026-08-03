@@ -102,6 +102,9 @@ class DownstreamStageAdapter:
                 settings["execution_timeout"]
             )
             task_evaluation["cleanup_revision"] = "humaneval-official-v1"
+        decoding: JsonObject = {"do_sample": False, "num_beams": 1}
+        if watermark["method"] == "pdw":
+            decoding["effective_sampling"] = "multinomial"
         semantic = {
             "task": task,
             "model": model,
@@ -109,7 +112,7 @@ class DownstreamStageAdapter:
             "batch_size": settings["batch_size"],
             "seed": settings["seed"],
             "max_new_tokens": settings["max_new_tokens"],
-            "decoding": {"do_sample": False, "num_beams": 1},
+            "decoding": decoding,
             "task_evaluation": task_evaluation,
             "watermark": watermark,
         }

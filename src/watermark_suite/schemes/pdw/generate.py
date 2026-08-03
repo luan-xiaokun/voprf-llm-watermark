@@ -18,6 +18,7 @@ from bplib.bp import Bn, BpGroup, G1Elem, G2Elem
 from petlib.pack import decode, encode
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers.cache_utils import DynamicCache
 
 from . import crypto, performance_monitor
 
@@ -27,6 +28,12 @@ MAX_TIME_BEFORE_GIVE_UP_SAMPLE_VALID_TOKEN = 300  # seconds
 STOP_TOKEN = "</s>"
 
 logging.basicConfig(filename="logging.log", encoding="utf-8", level=logging.INFO)
+
+
+def _fork_past_key_values(past: Any) -> Any:
+    if isinstance(past, DynamicCache):
+        return type(past).from_legacy_cache(past.to_legacy_cache())
+    return past
 
 
 def main(args: argparse.Namespace) -> None:
@@ -334,7 +341,7 @@ def generate_message_signature_pair(
         # Save a copy of inputs, past, and attn before sampling each signature segment
         # in case we need to retry the sample for a signature segment.
         inputs_before_signature_sampling = inputs
-        past_before_signature_sampling = past
+        past_before_signature_sampling = _fork_past_key_values(past)
         attn_before_signature_sampling = attn
 
         start_of_signature_segment_before_signature_sampling = (
@@ -359,7 +366,7 @@ def generate_message_signature_pair(
         while not is_signature_segment_valid:
             # Each time we retry the signature segment sample, we need to reset inputs, past, attn, and counter.
             inputs = inputs_before_signature_sampling
-            past = past_before_signature_sampling
+            past = _fork_past_key_values(past_before_signature_sampling)
             attn = attn_before_signature_sampling
             counter = counter_before_signature_segment_sampling
 

@@ -8,7 +8,9 @@ from dataclasses import asdict, is_dataclass
 from typing import Any
 
 import numpy as np
+import scipy.stats
 import torch
+from scipy import special
 
 from ..adapters import (
     ResolutionContext,
@@ -73,6 +75,40 @@ def _distribution(values: list[float | int]) -> JsonObject:
         "p75": percentile(0.75),
         "p95": percentile(0.95),
     }
+
+
+def minimum_green_count(
+    *,
+    method: str,
+    gamma: float,
+    scored_pair_num: int,
+    significance_level: float,
+) -> int:
+    """Smallest green count accepted by the configured detector test."""
+
+    if method not in {"vow", "lefthash", "selfhash"}:
+        raise ValueError(f"unsupported green-count detector {method!r}")
+    for green_count in range(scored_pair_num + 1):
+        if method == "vow":
+            p_value = (
+                1.0
+                if green_count == 0
+                else float(
+                    special.betainc(
+                        green_count,
+                        scored_pair_num - green_count + 1,
+                        gamma,
+                    )
+                )
+            )
+        else:
+            z_score = (
+                green_count - gamma * scored_pair_num
+            ) / math.sqrt(scored_pair_num * gamma * (1.0 - gamma))
+            p_value = float(scipy.stats.norm.sf(z_score))
+        if p_value < significance_level:
+            return green_count
+    return scored_pair_num + 1
 
 
 def adaptive_forgery_curve(
@@ -698,6 +734,26 @@ class _DetectionExecution:
                         for record in records
                     ]
                 )
+            effective_counts = {
+                int(record["detection"]["effective_token_num"])
+                for record in records
+            }
+            method = detector_watermark["method"]
+            if (
+                len(effective_counts) == 1
+                and method in {"vow", "lefthash", "selfhash"}
+            ):
+                scored_pair_num = next(iter(effective_counts))
+                if scored_pair_num > 0:
+                    summary["green_count_thresholds"] = {
+                        f"{level:.0e}": minimum_green_count(
+                            method=method,
+                            gamma=float(detector_watermark["gamma"]),
+                            scored_pair_num=scored_pair_num,
+                            significance_level=level,
+                        )
+                        for level in levels
+                    }
         return summary
 
     def close(self) -> None:

@@ -870,9 +870,16 @@ def test_adaptive_forgery_and_diversity_recipes(tmp_path):
         semantic={
             "model": MODEL,
             "prompt_population": PROMPT_POPULATION,
+            "max_new_tokens": 350,
+            "target_scored_pairs": 300,
+            "max_candidates": 2,
             "watermark": VOW,
         },
-        summary={"sample_num": 2},
+        summary={
+            "sample_num": 2,
+            "theoretical_green_probability": 0.75,
+            "theoretical_queries_per_scored_token": 1.5,
+        },
     )
     detected = detection(tmp_path, "forge_detection", forged)
     detected_summary = json.loads(
@@ -917,44 +924,74 @@ def test_adaptive_forgery_and_diversity_recipes(tmp_path):
                 "max": 92,
             },
             "green_ratio": 0.95,
+            "green_count_thresholds": {"1e-05": 188},
             "query_overhead_vs_honest_audit": 1.8,
         }
     )
-    detected_summary["adaptive_forgery_curve"] = [
-        {
-            "token_num": 50,
-            "eligible_sample_num": 2,
-            "mean_oracle_query_count": 90.0,
-            "median_oracle_query_count": 88.0,
-            "mean_queries_per_token": 1.8,
-            "mean_selected_green_token_count": 47.5,
-            "mean_selected_green_ratio": 0.95,
-            "median_p_value": 1e-8,
-            "attack_success_counts": {
-                "1e-05": {"positive_num": 2, "sample_num": 2}
-            },
-        }
-    ]
     (detected.path / "summary.json").write_text(
         json.dumps(detected_summary),
         encoding="utf-8",
     )
     ppl = perplexity(tmp_path, "forge_ppl", detected, VOW, 6.5)
+    forged_k3 = artifact(
+        tmp_path,
+        "forged_k3",
+        kind="adaptive-forgery",
+        schema="adaptive-forgery-v3",
+        semantic={
+            "model": MODEL,
+            "prompt_population": PROMPT_POPULATION,
+            "max_new_tokens": 350,
+            "target_scored_pairs": 300,
+            "max_candidates": 3,
+            "watermark": VOW,
+        },
+        summary={
+            "sample_num": 2,
+            "theoretical_green_probability": 0.875,
+            "theoretical_queries_per_scored_token": 1.75,
+        },
+    )
+    detected_k3 = detection(
+        tmp_path,
+        "forge_detection_k3",
+        forged_k3,
+        positive=2,
+        token_num=None,
+    )
+    ppl_k3 = perplexity(
+        tmp_path,
+        "forge_ppl_k3",
+        detected_k3,
+        VOW,
+        6.8,
+    )
+    unwatermarked = generation(tmp_path, "forge_baseline", NONE)
+    baseline_ppl = perplexity(
+        tmp_path,
+        "forge_baseline_ppl",
+        unwatermarked,
+        NONE,
+        5.1,
+    )
 
     forgery_rows, _ = assemble_stage(
         tmp_path,
-        (forged, detected, ppl),
-        (detected, ppl),
+        (
+            forged,
+            detected,
+            ppl,
+            forged_k3,
+            detected_k3,
+            ppl_k3,
+            unwatermarked,
+            baseline_ppl,
+        ),
+        (detected, detected_k3, ppl, ppl_k3, baseline_ppl),
         recipe="adaptive-forgery",
     )
 
     assert {
-        "mean_oracle_query_count",
-        "median_oracle_query_count",
-        "mean_queries_per_token",
-        "mean_selected_green_token_count",
-        "mean_selected_green_ratio",
-        "median_p_value",
         "attack_success_rate",
         "p_value",
         "negative_log10_p_value",
@@ -963,9 +1000,20 @@ def test_adaptive_forgery_and_diversity_recipes(tmp_path):
         "oracle_query_count",
         "total_oracle_query_count",
         "green_ratio",
+        "green_count_threshold",
         "query_overhead_vs_honest_audit",
+        "theoretical_green_probability",
+        "theoretical_queries_per_scored_token",
         "conditional_perplexity",
     } == {row["metric"] for row in forgery_rows}
+    assert sum(
+        row["metric"] == "conditional_perplexity"
+        for row in forgery_rows
+    ) == 3
+    assert sum(
+        row["metric"] == "attack_success_rate"
+        for row in forgery_rows
+    ) == 2
 
     generated = generation(tmp_path, "diverse_generation", VOW)
     diversity = artifact(

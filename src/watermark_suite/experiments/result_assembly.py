@@ -385,9 +385,9 @@ class ResultAssembler:
             for artifact in perplexities
             if artifact.dimensions.scheme == "none"
         ]
-        if len(baseline) != 1:
+        if len(baseline) > 1:
             raise PlanValidationError(
-                f"{recipe} requires exactly one unwatermarked PPL baseline"
+                f"{recipe} accepts at most one unwatermarked PPL baseline"
             )
 
         rows = []
@@ -693,47 +693,57 @@ class ResultAssembler:
             for artifact in artifacts
             if artifact.kind == "perplexity"
         )
-        if len(detections) != 1:
-            raise PlanValidationError(
-                f"{recipe} requires exactly one detection Artifact"
-            )
-        if len(perplexities) != 1:
-            raise PlanValidationError(
-                f"{recipe} requires exactly one PPL Artifact"
-            )
         self._require_comparable_population(artifacts, recipe=recipe)
-        self._require_comparable_generation(artifacts, recipe=recipe)
-        detection = detections[0]
-        ppl = perplexities[0]
-
-        curve_metrics = {
-            "mean_oracle_query_count",
-            "median_oracle_query_count",
-            "mean_queries_per_token",
-            "mean_selected_green_token_count",
-            "mean_selected_green_ratio",
-            "median_p_value",
-            "attack_success_rate",
+        generation_models = {
+            json.dumps(
+                artifact.dimensions.generation_model,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for artifact in artifacts
         }
-        curve_facts = tuple(
-            fact
-            for fact in detection.aggregate_facts
-            if fact.metric in curve_metrics
-            and fact.dimensions.token_num is not None
-        )
-        if not curve_facts:
+        if len(generation_models) != 1:
             raise PlanValidationError(
-                f"Artifact {detection.identity.value} has no forgery curve"
+                f"{recipe} requires one generation model"
             )
-        rows = [
-            self._row(
-                recipe=recipe,
-                metric=fact.metric,
-                fact=fact,
-                sources=(detection,),
+
+        baseline = tuple(
+            artifact
+            for artifact in perplexities
+            if artifact.dimensions.scheme == "none"
+        )
+        if len(baseline) != 1:
+            raise PlanValidationError(
+                f"{recipe} requires exactly one unwatermarked PPL baseline"
             )
-            for fact in curve_facts
-        ]
+        ppl_by_detection: dict[str, ArtifactInterpretation] = {}
+        for ppl in perplexities:
+            if ppl in baseline:
+                continue
+            parents = [
+                source.value
+                for source in ppl.direct_source_identities
+                if source.value
+                in {detection.identity.value for detection in detections}
+            ]
+            if len(parents) != 1 or parents[0] in ppl_by_detection:
+                raise PlanValidationError(
+                    f"PPL Artifact {ppl.identity.value} must uniquely pair "
+                    "with one forgery detection Artifact"
+                )
+            ppl_by_detection[parents[0]] = ppl
+        missing_ppl = sorted(
+            detection.identity.value
+            for detection in detections
+            if detection.identity.value not in ppl_by_detection
+        )
+        if missing_ppl:
+            raise PlanValidationError(
+                f"{recipe} lacks PPL Artifacts for {missing_ppl}"
+            )
+
+        rows = []
         overall_metrics = {
             "p_value",
             "negative_log10_p_value",
@@ -742,39 +752,95 @@ class ResultAssembler:
             "oracle_query_count",
             "total_oracle_query_count",
             "green_ratio",
+            "green_count_threshold",
             "query_overhead_vs_honest_audit",
         }
-        rows.extend(
-            self._row(
-                recipe=recipe,
-                metric=fact.metric,
-                fact=fact,
-                sources=(detection,),
+        for detection in detections:
+            if len(detection.direct_source_identities) != 1:
+                raise PlanValidationError(
+                    f"Detection Artifact {detection.identity.value} must "
+                    "have one forgery parent"
+                )
+            forgery = self.interpretations.artifact(
+                detection.direct_source_identities[0]
             )
-            for fact in detection.aggregate_facts
-            if fact.metric in overall_metrics
-            and fact.dimensions.token_num is None
-        )
-        if detection.identity not in ppl.direct_source_identities:
-            raise PlanValidationError(
-                f"PPL Artifact {ppl.identity.value} is not a direct "
-                f"descendant of detection Artifact {detection.identity.value}"
+            if forgery.kind != "adaptive-forgery":
+                raise PlanValidationError(
+                    f"Detection Artifact {detection.identity.value} is not "
+                    "derived from an adaptive forgery"
+                )
+            ppl = ppl_by_detection[detection.identity.value]
+            if (
+                detection.dimensions.scheme_identity
+                != ppl.dimensions.scheme_identity
+            ):
+                raise PlanValidationError(
+                    f"PPL Artifact {ppl.identity.value} and detection "
+                    f"{detection.identity.value} disagree on scheme"
+                )
+            rows.append(
+                self._row(
+                    recipe=recipe,
+                    metric="attack_success_rate",
+                    fact=self._one_detection_fact(
+                        detection,
+                        token_axis=False,
+                    ),
+                    sources=(detection,),
+                )
             )
-        if detection.dimensions.scheme_identity != ppl.dimensions.scheme_identity:
-            raise PlanValidationError(
-                f"PPL Artifact {ppl.identity.value} and detection "
-                f"{detection.identity.value} disagree on scheme"
+            rows.extend(
+                self._row(
+                    recipe=recipe,
+                    metric=fact.metric,
+                    fact=fact,
+                    sources=(detection,),
+                )
+                for fact in detection.aggregate_facts
+                if fact.metric in overall_metrics
+                and fact.dimensions.token_num is None
             )
-        rows.append(
-            self._row(
-                recipe=recipe,
-                metric="conditional_perplexity",
-                fact=self._one_fact(
-                    ppl, "conditional_perplexity", token_axis=False
-                ),
-                sources=(detection, ppl),
+            for metric in (
+                "theoretical_green_probability",
+                "theoretical_queries_per_scored_token",
+            ):
+                rows.append(
+                    self._row(
+                        recipe=recipe,
+                        metric=metric,
+                        fact=self._one_fact(
+                            forgery,
+                            metric,
+                            token_axis=False,
+                        ),
+                        sources=(detection,),
+                    )
+                )
+            rows.append(
+                self._row(
+                    recipe=recipe,
+                    metric="conditional_perplexity",
+                    fact=self._one_fact(
+                        ppl, "conditional_perplexity", token_axis=False
+                    ),
+                    sources=(ppl,),
+                )
             )
-        )
+
+        if baseline:
+            baseline_ppl = baseline[0]
+            rows.append(
+                self._row(
+                    recipe=recipe,
+                    metric="conditional_perplexity",
+                    fact=self._one_fact(
+                        baseline_ppl,
+                        "conditional_perplexity",
+                        token_axis=False,
+                    ),
+                    sources=(baseline_ppl,),
+                )
+            )
         return rows
 
     def _diversity(

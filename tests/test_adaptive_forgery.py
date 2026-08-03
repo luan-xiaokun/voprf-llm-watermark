@@ -9,18 +9,21 @@ from voprf_py import VoprfServer
 from watermark_suite.attacks import (
     AdaptiveCandidateSelector,
     AdaptiveWatermarkForger,
+    LocalColorOracle,
     VOPRFColorOracle,
     theoretical_green_probability,
     theoretical_queries_per_scored_token,
 )
 from watermark_suite.core.metrics import calculate_perplexities
 from watermark_suite.schemes.vow import VOWDetector
+from watermark_suite.schemes.kgw import KGWDetector
 from watermark_suite.experiments.stages.adaptive_forgery import (
     build_sample_metrics,
     build_summary,
 )
 from watermark_suite.experiments.stages.detection import (
     adaptive_forgery_curve,
+    minimum_green_count,
 )
 
 
@@ -70,6 +73,7 @@ class TinyCausalModel(torch.nn.Module):
             [2, 3, 4],
             [4, 2, 1],
             [1, 2, 3],
+            [2, 1, 3],
         ]
 
     @property
@@ -185,6 +189,41 @@ class AdaptiveWatermarkForgerTests(unittest.TestCase):
         self.assertEqual(
             compact["trace"][-1]["cumulative_oracle_query_count"], 6
         )
+
+    def test_stops_at_exact_unique_scored_pair_target(self):
+        forger = AdaptiveWatermarkForger(
+            model=TinyCausalModel(),
+            tokenizer=TinyTokenizer(),
+            oracle=MappingOracle({}),
+            window_size=1,
+            max_candidates=1,
+        )
+
+        result = forger.forge(
+            "prompt",
+            max_new_tokens=4,
+            target_scored_pairs=2,
+        )
+
+        self.assertEqual(result.generated_token_num, 3)
+        self.assertEqual(result.scored_token_num, 2)
+        self.assertEqual(result.unique_selected_pair_num, 2)
+
+    def test_reports_when_generation_cap_cannot_reach_target(self):
+        forger = AdaptiveWatermarkForger(
+            model=TinyCausalModel(),
+            tokenizer=TinyTokenizer(),
+            oracle=MappingOracle({}),
+            window_size=1,
+            max_candidates=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requested 4, observed 3"):
+            forger.forge(
+                "prompt",
+                max_new_tokens=4,
+                target_scored_pairs=4,
+            )
 
 
 def test_adaptive_forgery_curve_combines_cost_pvalue_and_asr():
@@ -355,9 +394,11 @@ class VOPRFColorOracleTests(unittest.TestCase):
         }
         summary = build_summary(
             SimpleNamespace(
+                method="vow",
                 gamma=gamma,
                 max_candidates=3,
                 window_size=1,
+                target_scored_pairs=None,
                 significance_levels=[0.01],
             ),
             [record],
@@ -372,6 +413,52 @@ class VOPRFColorOracleTests(unittest.TestCase):
         self.assertGreater(summary["total_communication_bytes"], 0)
 
 
+class KGWColorOracleTests(unittest.TestCase):
+    def test_left_and_self_hash_oracles_match_detector_colors(self):
+        for scheme in ("lefthash", "selfhash"):
+            detector = KGWDetector(
+                vocab=list(range(6)),
+                gamma=0.25,
+                seeding_scheme=scheme,
+                device="cpu",
+                tokenizer=TinyTokenizer(),
+                normalizers=[],
+                ignore_repeated_ngrams=True,
+            )
+
+            def color_interface(context, token_id, detector=detector):
+                prefix = (
+                    (*context, token_id)
+                    if detector.self_salt
+                    else context
+                )
+                return detector.is_green(prefix, token_id)
+
+            forger = AdaptiveWatermarkForger(
+                model=TinyCausalModel(),
+                tokenizer=TinyTokenizer(),
+                oracle=LocalColorOracle(color_interface),
+                window_size=(
+                    detector.context_width - int(detector.self_salt)
+                ),
+                max_candidates=2,
+            )
+            forgery = forger.forge("prompt", max_new_tokens=5)
+            detection = detector.detect(
+                tokenized_text=torch.tensor(forgery.token_ids),
+                return_prediction=False,
+            )
+
+            self.assertEqual(
+                detection.effective_token_num,
+                forgery.scored_token_num,
+            )
+            self.assertEqual(
+                detection.green_token_num,
+                forgery.selected_green_token_num,
+            )
+
+
 class AdaptiveForgeryTheoryTests(unittest.TestCase):
     def test_truncated_geometric_expectations(self):
         self.assertAlmostEqual(theoretical_green_probability(0.5, 3), 0.875)
@@ -384,6 +471,17 @@ class AdaptiveForgeryTheoryTests(unittest.TestCase):
             theoretical_green_probability(0.0, 3)
         with self.assertRaises(ValueError):
             theoretical_green_probability(0.5, 0)
+
+    def test_exact_vow_threshold_at_300_scored_pairs(self):
+        self.assertEqual(
+            minimum_green_count(
+                method="vow",
+                gamma=0.5,
+                scored_pair_num=300,
+                significance_level=0.00001,
+            ),
+            188,
+        )
 
 
 class PerplexityTests(unittest.TestCase):

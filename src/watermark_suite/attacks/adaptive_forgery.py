@@ -171,6 +171,39 @@ class VOPRFColorOracle:
         return int.from_bytes(output, "big") < threshold
 
 
+class LocalColorOracle:
+    """A counted color-only interface around a scheme's detector rule.
+
+    The adaptive forger receives this object rather than the detector or its
+    keying material.  Each cache miss is one submitted context-token pair.
+    """
+
+    def __init__(
+        self,
+        color_interface: Callable[[tuple[int, ...], int], bool],
+    ) -> None:
+        self.color_interface = color_interface
+        self._stats = ColorOracleStats()
+
+    @property
+    def query_count(self) -> int:
+        return self._stats.query_count
+
+    @property
+    def stats(self) -> ColorOracleStats:
+        return ColorOracleStats(**asdict(self._stats))
+
+    def query(self, context: tuple[int, ...], token_id: int) -> bool:
+        start = time.perf_counter()
+        result = bool(self.color_interface(context, token_id))
+        elapsed = time.perf_counter() - start
+        self._stats.query_count += 1
+        self._stats.server_round_count += 1
+        self._stats.evaluation_time_seconds += elapsed
+        self._stats.total_time_seconds += elapsed
+        return result
+
+
 @dataclass(frozen=True)
 class AdaptiveForgeryStep:
     """Decision made for one generated position."""
@@ -202,6 +235,7 @@ class AdaptiveForgeryResult:
     oracle_query_count: int
     color_check_count: int
     cache_hit_count: int
+    scored_position_num: int
     scored_token_num: int
     selected_green_token_num: int
     selected_green_ratio: float
@@ -397,6 +431,7 @@ class AdaptiveWatermarkForger:
         self,
         prompt: str,
         max_new_tokens: int,
+        target_scored_pairs: int | None = None,
         suppress_token_ids: Sequence[int] | None = None,
         stop_on_eos: bool = True,
     ) -> AdaptiveForgeryResult:
@@ -410,6 +445,8 @@ class AdaptiveWatermarkForger:
 
         if max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
+        if target_scored_pairs is not None and target_scored_pairs <= 0:
+            raise ValueError("target_scored_pairs must be positive or None")
 
         start = time.perf_counter()
         oracle_stats_before = self._oracle_stats()
@@ -451,6 +488,7 @@ class AdaptiveWatermarkForger:
         suppressed = set(suppress_token_ids or [])
         generated_token_ids: list[int] = []
         steps: list[AdaptiveForgeryStep] = []
+        selected_pairs: set[tuple[tuple[int, ...], int]] = set()
 
         for position in range(max_new_tokens):
             scores = next_token_logits[0].detach().float().clone()
@@ -495,6 +533,14 @@ class AdaptiveWatermarkForger:
             )
             steps.append(step)
             generated_token_ids.append(step.selected_token_id)
+            if step.context is not None:
+                selected_pairs.add((step.context, step.selected_token_id))
+
+            if (
+                target_scored_pairs is not None
+                and len(selected_pairs) >= target_scored_pairs
+            ):
+                break
 
             eos_token_id = getattr(self.tokenizer, "eos_token_id", None)
             if (
@@ -550,6 +596,17 @@ class AdaptiveWatermarkForger:
             next_token_logits = outputs.logits[:, -1, :]
             past_key_values = getattr(outputs, "past_key_values", None)
 
+        if (
+            target_scored_pairs is not None
+            and len(selected_pairs) < target_scored_pairs
+        ):
+            raise RuntimeError(
+                "generation cap was reached before the requested number of "
+                f"unique scored pairs: requested {target_scored_pairs}, "
+                f"observed {len(selected_pairs)} after "
+                f"{len(generated_token_ids)} tokens"
+            )
+
         elapsed_seconds = time.perf_counter() - start
         text = self.tokenizer.decode(
             generated_token_ids,
@@ -559,10 +616,18 @@ class AdaptiveWatermarkForger:
         roundtrip_token_ids = self.tokenizer.encode(text, add_special_tokens=False)
 
         scored_steps = [step for step in steps if step.selected_green is not None]
-        selected_green_token_num = sum(
-            step.selected_green is True for step in scored_steps
-        )
-        scored_token_num = len(scored_steps)
+        selected_pair_colors: dict[
+            tuple[tuple[int, ...], int], bool
+        ] = {}
+        for step in scored_steps:
+            if step.context is not None:
+                selected_pair_colors.setdefault(
+                    (step.context, step.selected_token_id),
+                    bool(step.selected_green),
+                )
+        selected_green_token_num = sum(selected_pair_colors.values())
+        scored_position_num = len(scored_steps)
+        scored_token_num = len(selected_pair_colors)
         green_candidate_ranks = [
             step.selected_rank
             for step in scored_steps
@@ -578,11 +643,6 @@ class AdaptiveWatermarkForger:
             for step in steps
             if step.log_probability_gap is not None
         ]
-        selected_pairs = {
-            (step.context, step.selected_token_id)
-            for step in scored_steps
-            if step.context is not None
-        }
         oracle_query_count = sum(
             step.oracle_query_count for step in steps
         )
@@ -622,6 +682,7 @@ class AdaptiveWatermarkForger:
             oracle_query_count=oracle_query_count,
             color_check_count=color_check_count,
             cache_hit_count=sum(step.cache_hit_count for step in steps),
+            scored_position_num=scored_position_num,
             scored_token_num=scored_token_num,
             selected_green_token_num=selected_green_token_num,
             selected_green_ratio=(
@@ -630,9 +691,9 @@ class AdaptiveWatermarkForger:
                 else 0.0
             ),
             fallback_count=fallback_count,
-            unique_selected_pair_num=len(selected_pairs),
+            unique_selected_pair_num=len(selected_pair_colors),
             duplicate_selected_pair_num=(
-                scored_token_num - len(selected_pairs)
+                scored_position_num - len(selected_pair_colors)
             ),
             elapsed_seconds=elapsed_seconds,
             oracle_time_seconds=oracle_time_seconds,
@@ -660,8 +721,8 @@ class AdaptiveWatermarkForger:
                 else 0.0
             ),
             fallback_ratio=(
-                fallback_count / scored_token_num
-                if scored_token_num
+                fallback_count / scored_position_num
+                if scored_position_num
                 else 0.0
             ),
             mean_green_candidate_rank=(

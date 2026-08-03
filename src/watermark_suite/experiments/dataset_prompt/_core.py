@@ -227,10 +227,13 @@ def _jsonl_records(
     path: Path,
     *,
     limit: int | None = None,
+    offset: int = 0,
 ) -> list[JsonObject]:
     records = []
     with path.open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
+            if line_number <= offset:
+                continue
             if limit is not None and len(records) >= limit:
                 break
             try:
@@ -272,6 +275,7 @@ class _TextDatasetAdapter(_DatasetPromptAdapter):
             "split",
             "prompt_field",
             "sample_id_field",
+            "selection_offset",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -289,6 +293,15 @@ class _TextDatasetAdapter(_DatasetPromptAdapter):
         path = _resolve_path(path_value, repository)
         if not path.exists():
             raise ResolutionError(f"dataset path does not exist: {path}")
+        selection_offset = raw.get("selection_offset", 0)
+        if (
+            not isinstance(selection_offset, int)
+            or isinstance(selection_offset, bool)
+            or selection_offset < 0
+        ):
+            raise PlanValidationError(
+                "dataset selection_offset must be a non-negative integer"
+            )
         source = {
             "alias": alias,
             "format": data_format,
@@ -300,6 +313,7 @@ class _TextDatasetAdapter(_DatasetPromptAdapter):
             "sample_id_field": raw.get(
                 "sample_id_field", self.default_id_field
             ),
+            "selection_offset": selection_offset,
         }
         records = self.load(source, limit=sample_num)
         if len(records) != sample_num:
@@ -317,7 +331,8 @@ class _TextDatasetAdapter(_DatasetPromptAdapter):
             "split": source["split"],
             "snapshot": snapshot,
             "selection": {
-                "mode": "first",
+                "mode": "slice" if selection_offset else "first",
+                "offset": selection_offset,
                 "count": sample_num,
                 "sample_ids": sample_ids,
             },
@@ -337,12 +352,20 @@ class _TextDatasetAdapter(_DatasetPromptAdapter):
         limit: int | None = None,
     ) -> list[JsonObject]:
         if source["format"] == "jsonl":
-            return _jsonl_records(Path(source["path"]), limit=limit)
+            return _jsonl_records(
+                Path(source["path"]),
+                limit=limit,
+                offset=int(source.get("selection_offset", 0)),
+            )
         from datasets import load_dataset
 
         dataset = load_dataset(source["path"], split=source["split"])
+        offset = int(source.get("selection_offset", 0))
         if limit is not None:
-            dataset = dataset.select(range(min(limit, len(dataset))))
+            end = min(offset + limit, len(dataset))
+            dataset = dataset.select(range(offset, end))
+        elif offset:
+            dataset = dataset.select(range(offset, len(dataset)))
         return [dict(item) for item in dataset]
 
     def snapshot(

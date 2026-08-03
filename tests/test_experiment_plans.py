@@ -188,6 +188,72 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
     assert report.semantic_settings["threshold_policy"] == {"default": 0.01}
 
 
+def test_usenix_forgery_plan_matches_the_table_design(monkeypatch):
+    plan = resolve_path(
+        USENIX_PLAN_DIRECTORY / "adaptive-forgery-qwen25-3b-1000.yaml",
+        monkeypatch,
+    )
+
+    forgeries = [
+        stage for stage in plan.stages if stage.kind == "adaptive-forgery"
+    ]
+    assert len(forgeries) == 7
+    assert all(
+        stage.semantic_settings["model"]["checkpoint"]
+        == "Qwen/Qwen2.5-3B-Instruct"
+        and stage.semantic_settings["max_new_tokens"] == 350
+        and stage.semantic_settings["target_scored_pairs"] == 300
+        and stage.semantic_settings["prompt_population"]["dataset"][
+            "selection"
+        ]["count"]
+        == 1000
+        for stage in forgeries
+    )
+    vow = [
+        stage
+        for stage in forgeries
+        if stage.semantic_settings["watermark"]["method"] == "vow"
+    ]
+    assert sorted(stage.semantic_settings["max_candidates"] for stage in vow) == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    baselines = [stage for stage in forgeries if stage not in vow]
+    assert {
+        stage.semantic_settings["watermark"]["method"]
+        for stage in baselines
+    } == {"lefthash", "selfhash"}
+    assert all(stage.semantic_settings["max_candidates"] == 2 for stage in baselines)
+
+    detections = [stage for stage in plan.stages if stage.kind == "detection"]
+    assert len(detections) == 7
+    assert all(
+        stage.semantic_settings["significance_levels"] == [0.00001]
+        and stage.semantic_settings["step_size"] is None
+        for stage in detections
+    )
+    perplexities = [
+        stage for stage in plan.stages if stage.kind == "perplexity"
+    ]
+    assert len(perplexities) == 8
+    controls = [stage for stage in plan.stages if stage.kind == "generation"]
+    assert len(controls) == 1
+    assert controls[0].semantic_settings["watermark"]["method"] == "none"
+
+    report = next(
+        stage
+        for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 15
+    assert report.semantic_settings["threshold_policy"] == {
+        "default": 0.00001
+    }
+
+
 def test_tpr_token_length_plan_contract(monkeypatch):
     plan = resolve("figure-tpr-vs-token-length.yaml", monkeypatch)
 

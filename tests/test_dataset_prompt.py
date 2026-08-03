@@ -110,6 +110,37 @@ def test_repetition_identity_is_owned_by_prompt_population(tmp_path):
     )
 
 
+def test_text_population_can_select_a_disjoint_offset_slice(tmp_path):
+    path = tmp_path / "c4.jsonl"
+    write_jsonl(
+        path,
+        [
+            {"original_index": index, "prompt_text": f"prompt {index}"}
+            for index in range(5)
+        ],
+    )
+    resolved = DATASET_PROMPTS.resolve(
+        {
+            "kind": "c4",
+            "format": "jsonl",
+            "path": str(path),
+            "selection_offset": 2,
+        },
+        catalog={},
+        repository=tmp_path,
+        sample_num=2,
+    )
+
+    materialized = DATASET_PROMPTS.materialize(resolved)
+
+    assert resolved.dataset["selection"]["mode"] == "slice"
+    assert resolved.dataset["selection"]["offset"] == 2
+    assert [sample.sample_id for sample in materialized.samples] == [
+        "c4:2",
+        "c4:3",
+    ]
+
+
 def test_materialization_rejects_dataset_mutation(tmp_path):
     path = tmp_path / "c4.jsonl"
     write_jsonl(path, [{"original_index": 1, "prompt_text": "before"}])

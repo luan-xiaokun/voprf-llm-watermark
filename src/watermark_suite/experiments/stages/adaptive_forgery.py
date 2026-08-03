@@ -10,6 +10,7 @@ from voprf_py import VoprfServer
 
 from watermark_suite.attacks import (
     AdaptiveWatermarkForger,
+    LocalColorOracle,
     VOPRFColorOracle,
     theoretical_green_probability,
     theoretical_queries_per_scored_token,
@@ -71,10 +72,10 @@ def build_sample_metrics(result: Any, detection: Any | None = None) -> JsonObjec
     ]
     metrics = {
         "generated_token_num": result.generated_token_num,
-        "scored_position_num": result.scored_token_num,
+        "scored_position_num": result.scored_position_num,
         "oracle_query_count": result.oracle_query_count,
         "color_check_count": result.color_check_count,
-        "voprf_round_count": (
+        "oracle_round_count": (
             result.oracle_protocol_stats.server_round_count
             if result.oracle_protocol_stats is not None
             else result.oracle_query_count
@@ -92,8 +93,8 @@ def build_sample_metrics(result: Any, detection: Any | None = None) -> JsonObjec
         "fallback_ratio": result.fallback_ratio,
         "selected_green_ratio": result.selected_green_ratio,
         "duplicate_selected_pair_ratio": (
-            result.duplicate_selected_pair_num / result.scored_token_num
-            if result.scored_token_num
+            result.duplicate_selected_pair_num / result.scored_position_num
+            if result.scored_position_num
             else 0.0
         ),
         "green_candidate_rank_histogram": {
@@ -163,6 +164,9 @@ def build_summary(
     total_scored = sum(
         record["scored_token_num"] for record in forgery_records
     )
+    total_scored_positions = sum(
+        record["scored_position_num"] for record in forgery_records
+    )
     total_green = sum(
         record["selected_green_token_num"] for record in forgery_records
     )
@@ -207,6 +211,12 @@ def build_summary(
         "gamma": gamma,
         "window_size": _get(settings, "window_size"),
         "max_candidates": max_candidates,
+        "theory_model": (
+            "independent-bernoulli"
+            if _get(settings, "method") == "vow"
+            else "independent-bernoulli-approximation"
+        ),
+        "target_scored_pairs": _get(settings, "target_scored_pairs"),
         "theoretical_green_probability": theoretical_green,
         "theoretical_queries_per_scored_token": theoretical_queries,
         "observed_minus_theoretical_green_probability": (
@@ -220,9 +230,12 @@ def build_summary(
         "oracle_query_count": total_queries,
         "color_check_count": total_checks,
         "cache_hit_count": total_hits,
-        "voprf_round_count": total_queries,
+        "oracle_round_count": sum(
+            record["server_round_count"] for record in protocol_stats
+        ),
         "generated_token_num": total_generated,
         "scored_token_num": total_scored,
+        "scored_position_num": total_scored_positions,
         "duplicate_selected_pair_num": total_duplicate,
         "observed_queries_per_generated_token": (
             total_queries / total_generated if total_generated else 0.0
@@ -230,13 +243,17 @@ def build_summary(
         "observed_queries_per_scored_token": observed_queries,
         "selected_green_ratio": observed_green,
         "fallback_ratio": (
-            total_fallbacks / total_scored if total_scored else 0.0
+            total_fallbacks / total_scored_positions
+            if total_scored_positions
+            else 0.0
         ),
         "cache_hit_ratio": (
             total_hits / total_checks if total_checks else 0.0
         ),
         "duplicate_selected_pair_ratio": (
-            total_duplicate / total_scored if total_scored else 0.0
+            total_duplicate / total_scored_positions
+            if total_scored_positions
+            else 0.0
         ),
         "generated_token_length": describe(
             [record["generated_token_num"] for record in sample_metrics]
@@ -331,7 +348,7 @@ def build_summary(
 
 class AdaptiveForgeryStageAdapter:
     kind = "adaptive-forgery"
-    revision = "adaptive-forgery-v2"
+    revision = "adaptive-forgery-v3"
     accepted_settings = {
         "model",
         "dataset",
@@ -339,6 +356,7 @@ class AdaptiveForgeryStageAdapter:
         "batch_size",
         "seed",
         "max_new_tokens",
+        "target_scored_pairs",
         "max_candidates",
         "watermark",
         "allow_special_tokens",
@@ -346,7 +364,7 @@ class AdaptiveForgeryStageAdapter:
         "device",
         "dtype",
     }
-    _required = accepted_settings
+    _required = accepted_settings - {"target_scored_pairs"}
 
     def resolve(
         self, settings: JsonObject, context: ResolutionContext
@@ -360,6 +378,17 @@ class AdaptiveForgeryStageAdapter:
             raise PlanValidationError("seed must be an integer")
         if settings["max_candidates"] <= 0:
             raise PlanValidationError("max_candidates must be positive")
+        target_scored_pairs = settings.get("target_scored_pairs")
+        if (
+            target_scored_pairs is not None
+            and (
+                not isinstance(target_scored_pairs, int)
+                or target_scored_pairs <= 0
+            )
+        ):
+            raise PlanValidationError(
+                "target_scored_pairs must be a positive integer or null"
+            )
         if settings["trace_level"] not in {"none", "compact", "full"}:
             raise PlanValidationError(
                 "trace_level must be none, compact, or full"
@@ -378,17 +407,16 @@ class AdaptiveForgeryStageAdapter:
         watermark = WATERMARK_SCHEMES.resolve(
             settings["watermark"], context.repository
         )
-        if watermark["method"] != "vow":
+        if watermark["method"] not in {"vow", "lefthash", "selfhash"}:
             raise PlanValidationError(
-                "adaptive-forgery requires watermark.method=vow"
+                "adaptive-forgery requires VOW, LeftHash, or SelfHash"
             )
         if not watermark["enabled"]:
             raise PlanValidationError(
                 "adaptive-forgery requires watermark.enabled=true"
             )
-        oracle = {
-            key: watermark[key]
-            for key in (
+        oracle_fields = (
+            (
                 "method",
                 "enabled",
                 "window_size",
@@ -396,13 +424,17 @@ class AdaptiveForgeryStageAdapter:
                 "server_seed_path",
                 "server_seed_sha256",
             )
-        }
+            if watermark["method"] == "vow"
+            else ("method", "enabled", "gamma")
+        )
+        oracle = {key: watermark[key] for key in oracle_fields}
         semantic = {
             "model": model,
             "prompt_population": prompt_population.to_dict(),
             "batch_size": settings["batch_size"],
             "seed": settings["seed"],
             "max_new_tokens": settings["max_new_tokens"],
+            "target_scored_pairs": target_scored_pairs,
             "max_candidates": settings["max_candidates"],
             "watermark": oracle,
             "allow_special_tokens": settings["allow_special_tokens"],
@@ -420,7 +452,7 @@ class AdaptiveForgeryStageAdapter:
             },
             semantic_settings=semantic,
             execution_settings=execution,
-            artifact_schema_revision="adaptive-forgery-v2",
+            artifact_schema_revision="adaptive-forgery-v3",
             resource_key=(
                 f"causal:{model['checkpoint']}@{model['revision']}:"
                 f"{settings['device']}:{settings['dtype']}"
@@ -455,21 +487,44 @@ class _AdaptiveForgeryExecution:
             padding_side="left",
         )
         watermark = semantic["watermark"]
-        server = VoprfServer(WATERMARK_SCHEMES.vow_seed(watermark))
+        if watermark["method"] == "vow":
+            server = VoprfServer(WATERMARK_SCHEMES.vow_seed(watermark))
 
-        def server_interface(blinded_elements: list[Any]) -> Any:
-            return server.batch_blind_evaluate(blinded_elements)
+            def server_interface(blinded_elements: list[Any]) -> Any:
+                return server.batch_blind_evaluate(blinded_elements)
 
-        oracle = VOPRFColorOracle(
-            server_public_key=server.get_public_key(),
-            server_interface=server_interface,
-            gamma=watermark["gamma"],
-        )
+            oracle = VOPRFColorOracle(
+                server_public_key=server.get_public_key(),
+                server_interface=server_interface,
+                gamma=watermark["gamma"],
+            )
+            prior_context_width = watermark["window_size"]
+        else:
+            kgw_detector, _ = WATERMARK_SCHEMES.detector(
+                watermark,
+                self.tokenizer,
+                device=context.execution_settings["device"],
+            )
+
+            def color_interface(
+                context_ids: tuple[int, ...], token_id: int
+            ) -> bool:
+                prefix = (
+                    (*context_ids, token_id)
+                    if kgw_detector.self_salt
+                    else context_ids
+                )
+                return kgw_detector.is_green(prefix, token_id)
+
+            oracle = LocalColorOracle(color_interface)
+            prior_context_width = (
+                kgw_detector.context_width - int(kgw_detector.self_salt)
+            )
         self.forger = AdaptiveWatermarkForger(
             model=self.model,
             tokenizer=self.tokenizer,
             oracle=oracle,
-            window_size=watermark["window_size"],
+            window_size=prior_context_width,
             max_candidates=semantic["max_candidates"],
         )
         self.samples = list(
@@ -514,6 +569,7 @@ class _AdaptiveForgeryExecution:
             result = self.forger.forge(
                 prompt=sample.model_prompt,
                 max_new_tokens=semantic["max_new_tokens"],
+                target_scored_pairs=semantic["target_scored_pairs"],
                 suppress_token_ids=(
                     None
                     if semantic["allow_special_tokens"]
@@ -521,6 +577,12 @@ class _AdaptiveForgeryExecution:
                 ),
                 stop_on_eos=True,
             )
+            if not result.tokenization_preserved:
+                raise PlanValidationError(
+                    f"forged Sample {sample.sample_id} changed under "
+                    "decode/re-tokenize"
+                )
+            validation = self._validate_prefix(result.text, result)
             records.append(
                 {
                     "sample_id": sample.sample_id,
@@ -530,17 +592,56 @@ class _AdaptiveForgeryExecution:
                     "adaptive_forgery": result.to_dict(
                         trace_level=semantic["trace_level"]
                     ),
+                    "forgery_validation": validation,
                     "sample_metrics": build_sample_metrics(result),
                 }
             )
         return WorkResult(records=tuple(records))
 
+    def _validate_prefix(
+        self,
+        text: str,
+        result: Any,
+    ) -> JsonObject:
+        token_ids = self.tokenizer.encode(text, add_special_tokens=False)
+        width = self.forger.window_size
+        scored_pairs = {
+            tuple(token_ids[index - width : index + 1])
+            for index in range(width, len(token_ids))
+        }
+        validation = {
+            "policy": "tokenizer-roundtrip-unique-ngram-v1",
+            "context_width": width,
+            "effective_token_num": len(scored_pairs),
+            "total_token_num": len(token_ids),
+        }
+        target = self.context.semantic_settings["target_scored_pairs"]
+        if (
+            target is not None
+            and validation["effective_token_num"] != target
+        ):
+            raise PlanValidationError(
+                "forged prefix does not contain the requested number of "
+                f"detector-scored pairs: expected {target}, observed "
+                f"{validation['effective_token_num']}"
+            )
+        if (
+            validation["effective_token_num"] != result.scored_token_num
+        ):
+            raise PlanValidationError(
+                "adaptive pair accounting disagrees with the retained prefix"
+            )
+        return validation
+
     def summarize(self, records: list[JsonObject]) -> JsonObject:
         semantic = self.context.semantic_settings
         settings = {
+            "method": semantic["watermark"]["method"],
             "gamma": semantic["watermark"]["gamma"],
-            "window_size": semantic["watermark"]["window_size"],
+            "window_size": self.forger.window_size,
             "max_candidates": semantic["max_candidates"],
+            "target_scored_pairs": semantic["target_scored_pairs"],
+            "significance_levels": [0.00001],
         }
         elapsed = sum(
             record["adaptive_forgery"]["elapsed_seconds"]

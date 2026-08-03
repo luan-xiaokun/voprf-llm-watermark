@@ -166,6 +166,11 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         )
         return True if target in greenlist_ids else False
 
+    def is_green(self, prefix: tuple[int, ...], target: int) -> bool:
+        """Return only the color of one detector-scored pair."""
+
+        return bool(self._get_ngram_score_cached(prefix, target))
+
     def _score_ngrams_in_passage(self, input_ids: torch.Tensor):
         """Core function to gather all ngrams in the input and compute their watermark."""
         if len(input_ids) - self.context_width < 1:

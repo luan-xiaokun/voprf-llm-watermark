@@ -128,6 +128,7 @@ def _generation(
         "seed": semantic.get("seed"),
         "repetitions": semantic.get("repetitions"),
         "max_new_tokens": semantic.get("max_new_tokens"),
+        "target_scored_pairs": semantic.get("target_scored_pairs"),
         "max_candidates": semantic.get("max_candidates"),
         "allow_special_tokens": semantic.get("allow_special_tokens"),
         "task_evaluation": semantic.get("task_evaluation"),
@@ -431,8 +432,9 @@ def _parse_forgery(
         "oracle_query_count",
         "color_check_count",
         "cache_hit_count",
-        "voprf_round_count",
+        "oracle_round_count",
         "generated_token_num",
+        "scored_position_num",
         "scored_token_num",
         "duplicate_selected_pair_num",
         "observed_queries_per_generated_token",
@@ -555,6 +557,23 @@ def _parse_detection(
         rates=summary.get("detection_rate"),
         operating_points=operating_points,
     )
+    thresholds = summary.get("green_count_thresholds", {})
+    if not isinstance(thresholds, dict):
+        raise ValueError("green_count_thresholds must be a mapping")
+    for level_text, value in thresholds.items():
+        level = float(level_text)
+        facts.append(
+            _RawMetricFact(
+                metric="green_count_threshold",
+                value=int(value),
+                target_fpr=level,
+                detection_operating_point=(
+                    operating_points.get(level_text)
+                    if isinstance(operating_points, dict)
+                    else None
+                ),
+            )
+        )
     sample_num = int(summary["sample_num"])
     for metric, field in (
         ("total_token_num", "total_token_num"),
@@ -1021,6 +1040,12 @@ schema_registry: dict[tuple[str, str], _SchemaAdapter] = {
     ("adaptive-forgery", "adaptive-forgery-v2"): _SchemaAdapter(
         "adaptive-forgery",
         "adaptive-forgery-v2",
+        _parse_forgery,
+        _stream_records,
+    ),
+    ("adaptive-forgery", "adaptive-forgery-v3"): _SchemaAdapter(
+        "adaptive-forgery",
+        "adaptive-forgery-v3",
         _parse_forgery,
         _stream_records,
     ),

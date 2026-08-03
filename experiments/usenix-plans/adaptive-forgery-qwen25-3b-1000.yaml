@@ -1,36 +1,42 @@
 version: 1
-name: adaptive-forgery-qwen25-3b-1000
+name: adaptive-forgery-qwen25-3b-instruct-1000
 
 models:
   qwen-forger:
-    checkpoint: Qwen/Qwen2.5-3B
+    checkpoint: Qwen/Qwen2.5-3B-Instruct
   qwen-ppl:
     checkpoint: Qwen/Qwen2.5-7B
 
 datasets:
-  c4-forgery:
-    kind: c4
-    format: jsonl
-    path: data/c4_realnewslike_subset_1000.jsonl
+  # Keep these prompts disjoint from the first 500 ELI5 prompts used by the
+  # USENIX robustness experiment.
+  eli5-forgery:
+    kind: eli5
+    format: huggingface
+    path: data/eli5
     split: train
-    prompt_field: prompt_text
-    sample_id_field: original_index
+    prompt_field: question
+    sample_id_field: null
+    selection_offset: 500
 
 defaults:
   device: cuda
   dtype: bfloat16
 
 stages:
-  forge_vow_default:
+  # The five VOW runs produce the candidate-budget table. Generation stops at
+  # the prefix containing exactly 300 unique pairs scored by the detector;
+  # max_new_tokens is only the overshoot/safety cap.
+  forge_vow:
     kind: adaptive-forgery
     model: qwen-forger
-    dataset: c4-forgery
+    dataset: eli5-forgery
     num_samples: 1000
     batch_size: 1
     seed: 42
-    max_new_tokens: 210
-    max_candidates: 8
-    watermark:
+    max_new_tokens: 350
+    target_scored_pairs: 300
+    watermark: &vow
       method: vow
       enabled: true
       window_size: 4
@@ -40,22 +46,98 @@ stages:
       naive_baseline: false
     allow_special_tokens: false
     trace_level: compact
+    sweep:
+      max_candidates: [1, 2, 3, 4, 5]
 
-  detect_forgery:
+  # The paradigm comparison uses the same prompts, length, and k=2 budget.
+  forge_green_red_baselines:
+    kind: adaptive-forgery
+    model: qwen-forger
+    dataset: eli5-forgery
+    num_samples: 1000
+    batch_size: 1
+    seed: 42
+    max_new_tokens: 350
+    target_scored_pairs: 300
+    max_candidates: 2
+    allow_special_tokens: false
+    trace_level: compact
+    sweep:
+      watermark:
+        - &lefthash
+          method: lefthash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+        - &selfhash
+          method: selfhash
+          enabled: true
+          gamma: 0.25
+          delta: 2.0
+
+  detect_vow_forgery:
     kind: detection
-    input: forge_vow_default
+    input: forge_vow
     batch_size: 64
     target_field: generated_text
     token_num: null
-    significance_levels: [0.000001, 0.00001, 0.0001, 0.001, 0.01]
+    significance_levels: [0.00001]
     use_local: true
-    step_size: 10
+    step_size: null
 
-  evaluate_forgery_ppl:
+  detect_green_red_forgery:
+    kind: detection
+    input: forge_green_red_baselines
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: null
+
+  evaluate_vow_forgery_ppl:
     kind: perplexity
-    input: detect_forgery
+    input: detect_vow_forgery
     model: qwen-ppl
-    batch_size: 16
+    batch_size: 12
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text
+
+  evaluate_green_red_forgery_ppl:
+    kind: perplexity
+    input: detect_green_red_forgery
+    model: qwen-ppl
+    batch_size: 12
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text
+
+  # A separate greedy control makes the manuscript's PPL comparison explicit.
+  generate_unwatermarked:
+    kind: generation
+    model: qwen-forger
+    dataset: eli5-forgery
+    num_samples: 1000
+    repetitions: 1
+    batch_size: 24
+    seed: 42
+    max_new_tokens: 300
+    do_sample: false
+    top_p: null
+    top_k: null
+    temperature: null
+    suppress_eos: true
+    stop_strings: null
+    watermark:
+      method: none
+      enabled: false
+
+  evaluate_unwatermarked_ppl:
+    kind: perplexity
+    input: generate_unwatermarked
+    model: qwen-ppl
+    batch_size: 12
     max_length: 2048
     prompt_field: prompt_text
     target_field: generated_text
@@ -63,8 +145,11 @@ stages:
   assemble_adaptive_forgery:
     kind: result-aggregation
     inputs:
-      - detect_forgery
-      - evaluate_forgery_ppl
+      - detect_vow_forgery
+      - detect_green_red_forgery
+      - evaluate_vow_forgery_ppl
+      - evaluate_green_red_forgery_ppl
+      - evaluate_unwatermarked_ppl
     recipe: adaptive-forgery
     confidence_level: 0.95
     threshold_policy:

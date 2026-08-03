@@ -66,7 +66,7 @@ def verify_model_materials(model: JsonObject) -> None:
 
 
 class LocalModelRuntime:
-    """Single-machine implementation that keeps one causal model resident."""
+    """Single-machine implementation that keeps one local model resident."""
 
     def __init__(self) -> None:
         self._key: str | None = None
@@ -164,6 +164,62 @@ class LocalModelRuntime:
         self._key = key
         self._tokenizer = tokenizer
         return tokenizer
+
+    def fill_mask(
+        self,
+        model: JsonObject,
+        *,
+        device: str,
+        dtype: str,
+    ) -> tuple[Any, Any]:
+        import torch
+        from transformers import (
+            AutoModelForMaskedLM,
+            AutoTokenizer,
+            pipeline,
+        )
+
+        selected_device = (
+            "cuda" if device == "auto" and torch.cuda.is_available() else device
+        )
+        if selected_device == "auto":
+            selected_device = "cpu"
+        key = repr(
+            (
+                "fill-mask",
+                model["checkpoint"],
+                model["revision"],
+                model["tokenizer_checkpoint"],
+                model["tokenizer_revision"],
+                selected_device,
+                dtype,
+            )
+        )
+        if self._key == key:
+            return self._model, self._tokenizer
+        self.release()
+        self._verify(model)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model["tokenizer_location"],
+            local_files_only=True,
+        )
+        loaded_model = AutoModelForMaskedLM.from_pretrained(
+            model["location"],
+            torch_dtype=_torch_dtype(dtype, selected_device),
+            local_files_only=True,
+        )
+        loaded_model.to(selected_device)
+        loaded_model.eval()
+        unmasker = pipeline(
+            "fill-mask",
+            model=loaded_model,
+            tokenizer=tokenizer,
+            device=torch.device(selected_device),
+        )
+        self._key = key
+        self._model = unmasker
+        self._tokenizer = tokenizer
+        return unmasker, tokenizer
 
     def encoder(self, model: JsonObject, *, device: str) -> Any:
         import torch

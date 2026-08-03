@@ -1,193 +1,341 @@
+from __future__ import annotations
+
 import random
+from dataclasses import dataclass
+from typing import Any, Callable, Sequence
 
 import nltk
-import torch
-from nltk.tokenize.treebank import TreebankWordDetokenizer
-from tqdm import tqdm
-from transformers import AutoTokenizer, pipeline
+from nltk.tokenize import TreebankWordTokenizer
 
-try:
-    nltk.data.find("tokenizers/punkt")
-    nltk.data.find("taggers/punkt_tab")
-    nltk.data.find("taggers/averaged_perceptron_tagger")
-    nltk.data.find("taggers/averaged_perceptron_tagger_eng")
-except Exception:
-    print("Downloading required NLTK data... (punkt, averaged_perceptron_tagger)")
-    nltk.download("punkt", quiet=True)
-    nltk.download("punkt_tab", quiet=True)
-    nltk.download("averaged_perceptron_tagger", quiet=True)
-    nltk.download("averaged_perceptron_tagger_eng", quiet=True)
-    print("Download complete.")
+
+_CONTENT_POS_PREFIXES = {"N", "V", "J", "R"}
+
+
+@dataclass(frozen=True)
+class SynonymReplacementResult:
+    text: str
+    eligible_word_count: int
+    selected_word_count: int
+    replaced_word_count: int
+    failed_replacement_count: int
+    target_replacement_rate: float
+    realized_replacement_rate: float
+    mean_selected_candidate_rank: float | None
+
+    def provenance(self) -> dict[str, int | float | None]:
+        return {
+            "eligible_word_count": self.eligible_word_count,
+            "selected_word_count": self.selected_word_count,
+            "replaced_word_count": self.replaced_word_count,
+            "failed_replacement_count": self.failed_replacement_count,
+            "target_replacement_rate": self.target_replacement_rate,
+            "realized_replacement_rate": self.realized_replacement_rate,
+            "mean_selected_candidate_rank": (
+                self.mean_selected_candidate_rank
+            ),
+        }
+
+
+@dataclass
+class _PreparedText:
+    text: str
+    tokens: list[str]
+    spans: list[tuple[int, int]]
+    tags: list[str]
+    eligible_indices: list[int]
+    selected_indices: list[int]
+    rng: random.Random
+    replacements: dict[int, str]
+    selected_ranks: list[int]
+
+
+@dataclass(frozen=True)
+class _MaskedRequest:
+    text_index: int
+    token_index: int
+    original_word: str
+    original_pos: str
+    masked_context: str
 
 
 class SynonymReplacer:
-    """
-    A class to replace words in a text with synonyms using a masked language model.
-    Models are loaded upon instantiation.
+    """Contextual masked-LM replacement with reproducible sampling.
+
+    The experiment runtime owns model loading.  This class only implements
+    the attack policy, which keeps model provenance and GPU residency under
+    the Experiment Run architecture.
     """
 
     def __init__(
-        self, model_checkpoint: str = "distilbert-base-uncased", device: int = -1
-    ):
-        """
-        Initializes the replacer and loads the necessary models.
-        """
-        print("Initializing SynonymReplacer and loading models...")
-
-        self.model_max_length = 512
-        self.safe_chunk_size = 400
-        self.chunk_overlap = 50
-
-        if device == -1:
-            computed_device = 0 if torch.cuda.is_available() else -1
-        else:
-            computed_device = device
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_checkpoint)
-        self.unmasker = pipeline(
-            "fill-mask",
-            model=model_checkpoint,
-            tokenizer=self.tokenizer,
-            device=computed_device,
-        )
-        self.detokenizer = TreebankWordDetokenizer()
-
-        print(f"Using device: {'GPU' if computed_device == 0 else 'CPU'}")
-        print(
-            f"Model max length: {self.model_max_length}, "
-            f"safe chunk size: {self.safe_chunk_size} (in sub-word tokens)"
-        )
-
-    def _preprocess_and_chunk_text(self, long_text: str) -> list[str]:
-        """
-        (Helper method) Splits text into manageable, overlapping chunks.
-        """
-        sentences = nltk.sent_tokenize(long_text)
-        processed_chunks = []
-
-        for sentence in sentences:
-            token_ids = self.tokenizer.encode(sentence, add_special_tokens=False)
-
-            if len(token_ids) <= self.safe_chunk_size:
-                processed_chunks.append(sentence)
-            else:
-                start = 0
-                while start < len(token_ids):
-                    end = start + self.safe_chunk_size
-                    chunk_ids = token_ids[start:end]
-                    processed_chunks.append(
-                        self.tokenizer.decode(chunk_ids, skip_special_tokens=True)
-                    )
-                    start += self.safe_chunk_size - self.chunk_overlap
-        return processed_chunks
-
-    def _batch_chunk_synonym_replacement(
         self,
-        text_chunks: list[str],
-        replacement_rate: float,
-        top_k: int,
-        batch_size: int = 16,
-    ) -> list[str]:
-        """
-        (Helper method) Processes a list of text chunks to replace synonyms.
-        """
-        all_masked_sentences, mapping_info, output_tokens_list = [], [], []
-
-        for i, chunk in enumerate(text_chunks):
-            try:
-                tokens = nltk.word_tokenize(chunk)
-                output_tokens_list.append(tokens[:])
-            except Exception:
-                output_tokens_list.append([])
-                continue
-
-            content_word_tags = {
-                "NN",
-                "NNS",
-                "NNP",
-                "NNPS",
-                "VB",
-                "VBD",
-                "VBG",
-                "VBN",
-                "VBP",
-                "VBZ",
-                "JJ",
-                "JJR",
-                "JJS",
-                "RB",
-                "RBR",
-                "RBS",
-            }
-            pos_tags = nltk.pos_tag(tokens)
-            candidate_indices = [
-                k
-                for k, (word, tag) in enumerate(pos_tags)
-                if tag in content_word_tags and len(word) >= 3
-            ]
-
-            num_to_replace = int(len(candidate_indices) * replacement_rate)
-            if num_to_replace == 0:
-                continue
-
-            indices_to_replace = sorted(
-                random.sample(candidate_indices, num_to_replace)
-            )
-
-            for index in indices_to_replace:
-                masked_tokens = tokens[:]
-                masked_tokens[index] = self.tokenizer.mask_token
-                all_masked_sentences.append(self.detokenizer.detokenize(masked_tokens))
-                mapping_info.append((i, index, tokens[index]))
-
-        if not all_masked_sentences:
-            return [
-                self.detokenizer.detokenize(tokens) for tokens in output_tokens_list
-            ]
-
-        all_predictions = self.unmasker(
-            all_masked_sentences, top_k=top_k, batch_size=batch_size
+        tokenizer: Any,
+        unmasker: Callable[..., Any],
+        *,
+        pos_tagger: Callable[[list[str]], list[tuple[str, str]]] | None = None,
+        model_max_length: int | None = None,
+    ) -> None:
+        if tokenizer.mask_token is None or tokenizer.mask_token_id is None:
+            raise ValueError("masked-LM tokenizer must define a mask token")
+        self.tokenizer = tokenizer
+        self.unmasker = unmasker
+        self.pos_tagger = pos_tagger or nltk.pos_tag
+        self.word_tokenizer = TreebankWordTokenizer()
+        self.model_max_length = self._resolve_model_max_length(
+            model_max_length
         )
 
-        for i, preds in enumerate(all_predictions):
-            if not isinstance(preds, list):
-                print(
-                    f"\n[WARNING] Skipping prediction due to unexpected format: {preds}"
+    def _resolve_model_max_length(self, explicit: int | None) -> int:
+        candidates = [explicit]
+        tokenizer_limit = getattr(self.tokenizer, "model_max_length", None)
+        candidates.append(tokenizer_limit)
+        model = getattr(self.unmasker, "model", None)
+        config = getattr(model, "config", None)
+        candidates.append(getattr(config, "max_position_embeddings", None))
+        valid = [
+            value
+            for value in candidates
+            if isinstance(value, int) and 2 < value < 100_000
+        ]
+        return min(valid) if valid else 512
+
+    @staticmethod
+    def _coarse_pos(tag: str) -> str | None:
+        prefix = tag[:1]
+        return prefix if prefix in _CONTENT_POS_PREFIXES else None
+
+    def _tag(self, tokens: list[str]) -> list[tuple[str, str]]:
+        try:
+            return self.pos_tagger(tokens)
+        except LookupError as error:
+            raise RuntimeError(
+                "NLTK POS tagger data is unavailable. Install it before the "
+                "run with `python -m nltk.downloader "
+                "averaged_perceptron_tagger_eng`."
+            ) from error
+
+    def _masked_context(self, text: str, span: tuple[int, int]) -> str:
+        prefix_ids = self.tokenizer.encode(
+            text[: span[0]], add_special_tokens=False
+        )
+        suffix_ids = self.tokenizer.encode(
+            text[span[1] :], add_special_tokens=False
+        )
+        special_token_num = self.tokenizer.num_special_tokens_to_add(
+            pair=False
+        )
+        context_budget = max(self.model_max_length - special_token_num - 1, 0)
+        left_num = min(len(prefix_ids), context_budget // 2)
+        right_num = min(len(suffix_ids), context_budget - left_num)
+        left_num = min(
+            len(prefix_ids), context_budget - right_num
+        )
+        selected_prefix = prefix_ids[-left_num:] if left_num else []
+        token_ids = [
+            *selected_prefix,
+            self.tokenizer.mask_token_id,
+            *suffix_ids[:right_num],
+        ]
+        return self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=False,
+        )
+
+    def _prepare_text(
+        self,
+        text: str,
+        *,
+        replacement_rate: float,
+        seed: int,
+    ) -> _PreparedText:
+        spans = list(self.word_tokenizer.span_tokenize(text))
+        tokens = [text[start:end] for start, end in spans]
+        tagged = self._tag(tokens)
+        tags = [tag for _, tag in tagged]
+        eligible_indices = [
+            index
+            for index, (word, tag) in enumerate(zip(tokens, tags))
+            if len(word) >= 3
+            and word.isalpha()
+            and self._coarse_pos(tag) is not None
+        ]
+        rng = random.Random(seed)
+        selected_num = int(len(eligible_indices) * replacement_rate)
+        selected_indices = sorted(
+            rng.sample(eligible_indices, selected_num)
+        )
+        return _PreparedText(
+            text=text,
+            tokens=tokens,
+            spans=spans,
+            tags=tags,
+            eligible_indices=eligible_indices,
+            selected_indices=selected_indices,
+            rng=rng,
+            replacements={},
+            selected_ranks=[],
+        )
+
+    @staticmethod
+    def _preserve_case(candidate: str, original: str) -> str:
+        if original.isupper():
+            return candidate.upper()
+        if original.istitle():
+            return candidate.capitalize()
+        return candidate.lower() if original.islower() else candidate
+
+    def _candidate_matches_pos(
+        self,
+        prepared: _PreparedText,
+        request: _MaskedRequest,
+        candidate: str,
+    ) -> bool:
+        start = max(request.token_index - 4, 0)
+        end = min(request.token_index + 5, len(prepared.tokens))
+        context = prepared.tokens[start:end]
+        relative_index = request.token_index - start
+        context[relative_index] = candidate
+        candidate_tag = self._tag(context)[relative_index][1]
+        return self._coarse_pos(candidate_tag) == self._coarse_pos(
+            request.original_pos
+        )
+
+    def _valid_candidates(
+        self,
+        prepared: _PreparedText,
+        request: _MaskedRequest,
+        predictions: Sequence[dict[str, Any]],
+    ) -> list[tuple[str, float, int]]:
+        valid = []
+        for rank, prediction in enumerate(predictions, start=1):
+            raw = str(prediction.get("token_str", ""))
+            candidate = raw.strip()
+            score = prediction.get("score", 0.0)
+            if (
+                not candidate
+                or raw.lstrip().startswith("##")
+                or not candidate.isalpha()
+                or candidate.casefold() == request.original_word.casefold()
+                or not isinstance(score, (int, float))
+                or score < 0
+                or not self._candidate_matches_pos(
+                    prepared, request, candidate
                 )
+            ):
                 continue
+            valid.append((candidate, float(score), rank))
+        return valid
 
-            original_chunk_idx, token_idx, original_word = mapping_info[i]
-
-            best_replacement = None
-            for pred in preds:
-                if (
-                    pred["token_str"].lower() != original_word.lower()
-                    and pred["token_str"].isalpha()
-                ):
-                    best_replacement = pred["token_str"]
-                    break
-
-            if best_replacement:
-                if original_word.isupper():
-                    best_replacement = best_replacement.upper()
-                elif original_word.istitle():
-                    best_replacement = best_replacement.capitalize()
-                output_tokens_list[original_chunk_idx][token_idx] = best_replacement
-
-        return [self.detokenizer.detokenize(tokens) for tokens in output_tokens_list]
-
-    def replace_synonyms(
-        self, texts: list[str], replacement_rate: float, top_k: int = 15
-    ) -> list[str]:
-        """
-        Public method to perform synonym replacement on a list of texts.
-        """
-        results = []
-        for text in tqdm(texts, desc="Synonym Replacement Processing"):
-            safe_chunks = self._preprocess_and_chunk_text(text)
-            modified_chunks = self._batch_chunk_synonym_replacement(
-                safe_chunks, replacement_rate, top_k
+    @staticmethod
+    def _prediction_batches(
+        predictions: Any,
+        request_num: int,
+    ) -> list[list[dict[str, Any]]]:
+        if request_num == 1 and predictions and isinstance(predictions[0], dict):
+            return [predictions]
+        if not isinstance(predictions, list) or len(predictions) != request_num:
+            raise RuntimeError(
+                "fill-mask pipeline returned an unexpected number of results"
             )
-            final_text = " ".join(modified_chunks)
-            results.append(final_text)
+        if not all(isinstance(value, list) for value in predictions):
+            raise RuntimeError("fill-mask pipeline returned malformed results")
+        return predictions
+
+    def replace_many(
+        self,
+        texts: Sequence[str],
+        *,
+        seeds: Sequence[int],
+        replacement_rate: float,
+        top_k: int = 15,
+        candidate_sampling: str = "score-weighted",
+        batch_size: int = 16,
+    ) -> list[SynonymReplacementResult]:
+        if len(texts) != len(seeds):
+            raise ValueError("texts and seeds must have the same length")
+        if not 0 < replacement_rate < 1:
+            raise ValueError("replacement_rate must be between zero and one")
+        if top_k <= 0:
+            raise ValueError("top_k must be positive")
+        if candidate_sampling != "score-weighted":
+            raise ValueError(
+                "candidate_sampling must be score-weighted"
+            )
+        prepared = [
+            self._prepare_text(
+                text,
+                replacement_rate=replacement_rate,
+                seed=seed,
+            )
+            for text, seed in zip(texts, seeds)
+        ]
+        requests = [
+            _MaskedRequest(
+                text_index=text_index,
+                token_index=token_index,
+                original_word=value.tokens[token_index],
+                original_pos=value.tags[token_index],
+                masked_context=self._masked_context(
+                    value.text, value.spans[token_index]
+                ),
+            )
+            for text_index, value in enumerate(prepared)
+            for token_index in value.selected_indices
+        ]
+        if requests:
+            raw_predictions = self.unmasker(
+                [request.masked_context for request in requests],
+                top_k=top_k,
+                batch_size=batch_size,
+            )
+            prediction_batches = self._prediction_batches(
+                raw_predictions, len(requests)
+            )
+            for request, predictions in zip(requests, prediction_batches):
+                value = prepared[request.text_index]
+                candidates = self._valid_candidates(
+                    value, request, predictions
+                )
+                if not candidates:
+                    continue
+                weights = [candidate[1] for candidate in candidates]
+                if not any(weights):
+                    weights = None
+                candidate, _, rank = value.rng.choices(
+                    candidates, weights=weights, k=1
+                )[0]
+                value.replacements[request.token_index] = self._preserve_case(
+                    candidate, request.original_word
+                )
+                value.selected_ranks.append(rank)
+
+        results = []
+        for value in prepared:
+            transformed = value.text
+            for token_index, replacement in sorted(
+                value.replacements.items(), reverse=True
+            ):
+                start, end = value.spans[token_index]
+                transformed = transformed[:start] + replacement + transformed[end:]
+            eligible_num = len(value.eligible_indices)
+            selected_num = len(value.selected_indices)
+            replaced_num = len(value.replacements)
+            results.append(
+                SynonymReplacementResult(
+                    text=transformed,
+                    eligible_word_count=eligible_num,
+                    selected_word_count=selected_num,
+                    replaced_word_count=replaced_num,
+                    failed_replacement_count=selected_num - replaced_num,
+                    target_replacement_rate=replacement_rate,
+                    realized_replacement_rate=(
+                        replaced_num / eligible_num if eligible_num else 0.0
+                    ),
+                    mean_selected_candidate_rank=(
+                        sum(value.selected_ranks) / len(value.selected_ranks)
+                        if value.selected_ranks
+                        else None
+                    ),
+                )
+            )
         return results

@@ -5,6 +5,7 @@ import re
 import statistics
 from typing import Any
 
+from ...attacks.synonym_replacement import SynonymReplacer
 from ..adapters import (
     ResolutionContext,
     ResolvedStageDefinition,
@@ -18,10 +19,18 @@ from .common import (
     artifact_records,
     batches,
     require,
+    resolve_model,
     validate_execution_settings,
 )
 
 
+_MASKED_LM_REPLACEMENT_FIELDS = {
+    "method",
+    "model",
+    "replacement_rate",
+    "top_k",
+    "candidate_sampling",
+}
 _OPENAI_PARAPHRASE_FIELDS = {
     "method",
     "model",
@@ -40,6 +49,49 @@ def _resolve_transformation(
     if not isinstance(value, dict):
         raise PlanValidationError("transformation must be a mapping")
     method = value.get("method")
+    if method == "masked-lm-replacement":
+        unknown = sorted(set(value) - _MASKED_LM_REPLACEMENT_FIELDS)
+        missing = sorted(_MASKED_LM_REPLACEMENT_FIELDS - set(value))
+        if unknown or missing:
+            messages = []
+            if unknown:
+                messages.append("unknown: " + ", ".join(unknown))
+            if missing:
+                messages.append("missing: " + ", ".join(missing))
+            raise PlanValidationError(
+                "masked-lm-replacement settings are invalid ("
+                + "; ".join(messages)
+                + ")"
+            )
+        rate = value["replacement_rate"]
+        if (
+            not isinstance(rate, (int, float))
+            or isinstance(rate, bool)
+            or not 0 < rate < 1
+        ):
+            raise PlanValidationError(
+                "masked-lm-replacement replacement_rate must be between "
+                "zero and one"
+            )
+        if (
+            not isinstance(value["top_k"], int)
+            or isinstance(value["top_k"], bool)
+            or value["top_k"] <= 0
+        ):
+            raise PlanValidationError(
+                "masked-lm-replacement top_k must be positive"
+            )
+        if value["candidate_sampling"] != "score-weighted":
+            raise PlanValidationError(
+                "masked-lm-replacement candidate_sampling must be "
+                "score-weighted"
+            )
+        model = resolve_model(
+            value["model"],
+            models=context.models,
+            repository=context.repository,
+        )
+        return {**value, "model": model}
     if method == "word-deletion":
         unknown = sorted(set(value) - {"method", "rate"})
         if unknown:
@@ -109,14 +161,14 @@ def _resolve_transformation(
             )
         return dict(value)
     raise PlanValidationError(
-        "transformation.method must be word-deletion or "
-        "openai-paraphrase"
+        "transformation.method must be masked-lm-replacement, "
+        "word-deletion, or openai-paraphrase"
     )
 
 
 class RobustnessStageAdapter:
     kind = "robustness"
-    revision = "robustness-v2"
+    revision = "robustness-v3"
     accepted_settings = {
         "transformation",
         "batch_size",
@@ -152,6 +204,12 @@ class RobustnessStageAdapter:
         resource_key = "cpu:robustness"
         if transformation["method"] == "openai-paraphrase":
             resource_key = f"remote:openai:{transformation['model']}"
+        elif transformation["method"] == "masked-lm-replacement":
+            model = transformation["model"]
+            resource_key = (
+                f"local:fill-mask:{model['checkpoint']}@{model['revision']}:"
+                f"{settings['device']}:{settings['dtype']}"
+            )
         return ResolvedStageDefinition(
             settings={
                 **settings,
@@ -216,6 +274,14 @@ class _RobustnessExecution:
             if transformation["method"] == "openai-paraphrase"
             else None
         )
+        self.synonym_replacer = None
+        if transformation["method"] == "masked-lm-replacement":
+            unmasker, tokenizer = context.runtime.fill_mask(
+                transformation["model"],
+                device=context.execution_settings["device"],
+                dtype=context.execution_settings["dtype"],
+            )
+            self.synonym_replacer = SynonymReplacer(tokenizer, unmasker)
 
     def work_items(self) -> list[WorkItem]:
         result = []
@@ -283,7 +349,7 @@ class _RobustnessExecution:
                 for record, text in zip(item.payload, texts)
             ]
             provenance = [{} for _ in transformed]
-        else:
+        elif transformation["method"] == "openai-paraphrase":
             paraphrases = self.paraphraser.paraphrase_many(
                 texts,
                 concurrency=semantic["batch_size"],
@@ -295,6 +361,20 @@ class _RobustnessExecution:
             )
             transformed = [result.text for result in paraphrases]
             provenance = [result.provenance for result in paraphrases]
+        else:
+            replacements = self.synonym_replacer.replace_many(
+                texts,
+                seeds=[
+                    derived_seed(semantic["seed"], record["sample_id"])
+                    for record in item.payload
+                ],
+                replacement_rate=transformation["replacement_rate"],
+                top_k=transformation["top_k"],
+                candidate_sampling=transformation["candidate_sampling"],
+                batch_size=semantic["batch_size"],
+            )
+            transformed = [result.text for result in replacements]
+            provenance = [result.provenance() for result in replacements]
         records = []
         for source, original, changed, remote_provenance in zip(
             item.payload,
@@ -360,6 +440,50 @@ class _RobustnessExecution:
                     )
                     for field in usage_fields
                 },
+            }
+        replacement_records = [
+            record["robustness"]
+            for record in records
+            if record["robustness"]["method"]
+            == "masked-lm-replacement"
+        ]
+        if replacement_records:
+            eligible_num = sum(
+                record["eligible_word_count"]
+                for record in replacement_records
+            )
+            selected_num = sum(
+                record["selected_word_count"]
+                for record in replacement_records
+            )
+            replaced_num = sum(
+                record["replaced_word_count"]
+                for record in replacement_records
+            )
+            ranked_replacement_num = sum(
+                record["replaced_word_count"]
+                for record in replacement_records
+                if record["mean_selected_candidate_rank"] is not None
+            )
+            rank_sum = sum(
+                record["mean_selected_candidate_rank"]
+                * record["replaced_word_count"]
+                for record in replacement_records
+                if record["mean_selected_candidate_rank"] is not None
+            )
+            summary["masked_lm_replacement"] = {
+                "eligible_word_count": eligible_num,
+                "selected_word_count": selected_num,
+                "replaced_word_count": replaced_num,
+                "failed_replacement_count": selected_num - replaced_num,
+                "realized_replacement_rate": (
+                    replaced_num / eligible_num if eligible_num else 0.0
+                ),
+                "mean_selected_candidate_rank": (
+                    rank_sum / ranked_replacement_num
+                    if ranked_replacement_num
+                    else None
+                ),
             }
         return summary
 

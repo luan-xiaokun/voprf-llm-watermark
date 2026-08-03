@@ -6,6 +6,8 @@ models:
     checkpoint: Qwen/Qwen2.5-7B-Instruct
   similarity-encoder:
     checkpoint: sentence-transformers/all-mpnet-base-v2
+  synonym-replacer:
+    checkpoint: distilbert/distilbert-base-uncased
 
 datasets:
   eli5-robustness:
@@ -96,8 +98,11 @@ stages:
     seed: 42
     sweep:
       transformation:
-        - method: word-deletion
-          rate: 0.1
+        - method: masked-lm-replacement
+          model: synonym-replacer
+          replacement_rate: 0.3
+          top_k: 15
+          candidate_sampling: score-weighted
         - method: openai-paraphrase
           model: gpt-3.5-turbo-0125
           max_output_tokens: 600
@@ -177,8 +182,11 @@ stages:
     seed: 42
     sweep:
       transformation:
-        - method: word-deletion
-          rate: 0.1
+        - method: masked-lm-replacement
+          model: synonym-replacer
+          replacement_rate: 0.3
+          top_k: 15
+          candidate_sampling: score-weighted
         - method: openai-paraphrase
           model: gpt-3.5-turbo-0125
           max_output_tokens: 600

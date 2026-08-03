@@ -199,7 +199,25 @@ def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
         stage.semantic_settings["transformation"]["method"]
         for stage in plan.stages
         if stage.kind == "robustness"
-    } == {"word-deletion", "openai-paraphrase"}
+    } == {"masked-lm-replacement", "openai-paraphrase"}
+    replacements = [
+        stage.semantic_settings["transformation"]
+        for stage in plan.stages
+        if (
+            stage.kind == "robustness"
+            and stage.semantic_settings["transformation"]["method"]
+            == "masked-lm-replacement"
+        )
+    ]
+    assert all(value["replacement_rate"] == 0.3 for value in replacements)
+    assert all(value["top_k"] == 15 for value in replacements)
+    assert all(
+        value["candidate_sampling"] == "score-weighted"
+        for value in replacements
+    )
+    assert {
+        value["model"]["checkpoint"] for value in replacements
+    } == {"distilbert/distilbert-base-uncased"}
     paraphrases = [
         stage.semantic_settings["transformation"]
         for stage in plan.stages

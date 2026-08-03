@@ -161,6 +161,101 @@ def test_robustness_stage_preserves_source_and_transformation_lineage(
     assert bound.semantic_settings["watermark"] == WATERMARK
 
 
+def test_robustness_stage_records_masked_lm_replacement_metrics(
+    tmp_path,
+    monkeypatch,
+):
+    import watermark_suite.experiments.stages.robustness as module
+
+    class FakeReplacement:
+        text = "Cats pursue mice."
+
+        @staticmethod
+        def provenance():
+            return {
+                "eligible_word_count": 3,
+                "selected_word_count": 1,
+                "replaced_word_count": 1,
+                "failed_replacement_count": 0,
+                "target_replacement_rate": 0.3,
+                "realized_replacement_rate": 1 / 3,
+                "mean_selected_candidate_rank": 2.0,
+            }
+
+    class FakeReplacer:
+        def __init__(self, tokenizer, unmasker):
+            assert tokenizer == "tokenizer"
+            assert unmasker == "unmasker"
+
+        def replace_many(self, texts, **settings):
+            assert texts == ["Cats chase mice."]
+            assert len(settings["seeds"]) == 1
+            assert settings["replacement_rate"] == 0.3
+            assert settings["top_k"] == 15
+            assert settings["candidate_sampling"] == "score-weighted"
+            return [FakeReplacement()]
+
+    class FakeMaskedLMRuntime:
+        def fill_mask(self, model, *, device, dtype):
+            assert model == MODEL
+            assert device == "cpu"
+            assert dtype == "float32"
+            return "unmasker", "tokenizer"
+
+    monkeypatch.setattr(module, "resolve_model", lambda *args, **kwargs: MODEL)
+    monkeypatch.setattr(module, "SynonymReplacer", FakeReplacer)
+    source = source_artifact(
+        tmp_path,
+        [
+            {
+                "sample_id": "sample:1",
+                "generated_text": "Cats chase mice.",
+            }
+        ],
+    )
+    adapter = RobustnessStageAdapter()
+    definition = adapter.resolve(
+        {
+            "transformation": {
+                "method": "masked-lm-replacement",
+                "model": "synonym-replacer",
+                "replacement_rate": 0.3,
+                "top_k": 15,
+                "candidate_sampling": "score-weighted",
+            },
+            "batch_size": 4,
+            "target_field": "generated_text",
+            "seed": 42,
+            "device": "cpu",
+            "dtype": "float32",
+        },
+        resolution_context(tmp_path),
+    )
+    bound = adapter.bind_inputs(definition, (source,))
+    execution = adapter.prepare(
+        execution_context(
+            tmp_path,
+            definition=bound,
+            source=source,
+            runtime=FakeMaskedLMRuntime(),
+        )
+    )
+
+    result = execution.execute(execution.work_items()[0])
+    summary = execution.summarize(list(result.records))
+
+    assert result.records[0]["transformed_text"] == "Cats pursue mice."
+    assert result.records[0]["robustness"]["replaced_word_count"] == 1
+    assert summary["masked_lm_replacement"] == {
+        "eligible_word_count": 3,
+        "selected_word_count": 1,
+        "replaced_word_count": 1,
+        "failed_replacement_count": 0,
+        "realized_replacement_rate": 1 / 3,
+        "mean_selected_candidate_rank": 2.0,
+    }
+
+
 class FakeResponses:
     def __init__(self):
         self.requests = []

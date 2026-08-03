@@ -13,7 +13,7 @@ from ..models import ArtifactIdentity, ArtifactRef, JsonObject
 from ..workspace import ExperimentWorkspace
 
 
-ARTIFACT_INTERPRETATION_REVISION = "artifact-interpretation-v1"
+ARTIFACT_INTERPRETATION_REVISION = "artifact-interpretation-v2"
 
 
 class MetricScope(StrEnum):
@@ -112,17 +112,20 @@ class ScientificDimensions:
     task: str | None = None
     token_num: int | None = None
     target_fpr: float | None = None
+    detection_operating_point: JsonObject | None = None
 
     def with_metric_axes(
         self,
         *,
         token_num: int | None = None,
         target_fpr: float | None = None,
+        detection_operating_point: JsonObject | None = None,
     ) -> "ScientificDimensions":
         return replace(
             self,
             token_num=token_num,
             target_fpr=target_fpr,
+            detection_operating_point=detection_operating_point,
         )
 
     def to_dict(self) -> JsonObject:
@@ -140,6 +143,7 @@ class ScientificDimensions:
             "task": self.task,
             "token_num": self.token_num,
             "target_fpr": self.target_fpr,
+            "detection_operating_point": self.detection_operating_point,
         }
 
 
@@ -248,6 +252,7 @@ class _RawMetricFact:
     value: float | int | None
     token_num: int | None = None
     target_fpr: float | None = None
+    detection_operating_point: JsonObject | None = None
     count: ExactCount | None = None
     distribution: Distribution | None = None
 
@@ -615,6 +620,11 @@ def _fact_issue(
         return "token_num must be non-negative"
     if fact.target_fpr is not None and not 0 < fact.target_fpr < 1:
         return "target_fpr must be between zero and one"
+    if (
+        fact.detection_operating_point is not None
+        and not isinstance(fact.detection_operating_point, dict)
+    ):
+        return "detection_operating_point must be a mapping"
     if fact.metric in {
         "detection_rate",
         "attack_success_rate",
@@ -651,7 +661,10 @@ def _fact_issue(
         }
     ) and float(fact.value) < 0:
         return f"{fact.metric} must be non-negative"
-    if fact.metric == "p_value" and fact.distribution is not None:
+    if fact.metric in {
+        "p_value",
+        "classifier_confidence",
+    } and fact.distribution is not None:
         if (
             fact.distribution.minimum is not None
             and fact.distribution.minimum < 0
@@ -659,7 +672,7 @@ def _fact_issue(
             fact.distribution.maximum is not None
             and fact.distribution.maximum > 1
         ):
-            return "p-value distribution must lie between zero and one"
+            return f"{fact.metric} distribution must lie between zero and one"
     if fact.count is not None and fact.count.sample_num > record_count:
         return (
             f"fact population {fact.count.sample_num} exceeds manifest "
@@ -1092,6 +1105,9 @@ def interpret_artifacts(
                         dimensions=dimensions.with_metric_axes(
                             token_num=raw_fact.token_num,
                             target_fpr=raw_fact.target_fpr,
+                            detection_operating_point=(
+                                raw_fact.detection_operating_point
+                            ),
                         ),
                         source_artifact=ArtifactIdentity(identity),
                         count=raw_fact.count,

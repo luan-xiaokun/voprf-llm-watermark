@@ -141,6 +141,16 @@ Watermark validation, material verification, and paired generator/detector
 construction live in one scheme registry. Experiment stages select a scheme
 through that registry instead of reproducing method-specific branches.
 
+Detection operating points are explicit Artifact semantics. Detectors with
+calibrated p-values retain their requested target FPR. UPV does not expose a
+p-value: its private classifier uses the fixed rule
+`classifier_confidence > 0.5`. The checked-in legacy calibration records an
+empirical FPR of `7920 / 1,000,000 = 0.00792` on 255-token C4 chunks. UPV
+report rows therefore leave `target_fpr` empty and carry the classifier rule,
+empirical FPR, exact calibration count, calibration token length, material
+digest, and calibration provenance. Generic `significance_levels` are removed
+from the semantic settings of a detection Run once it is bound to UPV.
+
 The robustness stage never edits its source Artifact. It emits
 `original_text`, `transformed_text`, transformation provenance, and length
 statistics in a new Artifact. Detection and text evaluation can independently
@@ -173,13 +183,13 @@ score; similarity retains per-sample cosine scores and distribution summaries.
 
 Each paper Plan ends in a `result-aggregation` stage. It validates all source
 schemas and transitive lineage, rejects incomparable sample populations or
-ambiguous joins, and emits an `experiment-report-v1` Artifact. Its
+ambiguous joins, and emits an `experiment-report-v2` Artifact. Its
 `records.jsonl` is a deterministic long-form metric table with scientific
 dimensions, exact numerator/denominator counts, uncertainty metadata, and
 source Artifact identities. Supported recipes are TPR/token, TPR/PPL,
 downstream performance, robustness, adaptive forgery, and diversity.
 
-Before a recipe runs, the in-process `artifact-interpretation-v1` module
+Before a recipe runs, the in-process `artifact-interpretation-v2` module
 preflights every root Artifact and transitive ancestor. Support is exact by
 Artifact kind and schema revision; unknown revisions, kind/schema mismatches,
 missing lineage, conflicting inherited scientific provenance, and cheap
@@ -195,6 +205,8 @@ Producer schemas `generated-text-v3`, `adaptive-forgery-v2`,
 Population as the single population/prompt provenance seam. Artifact
 Interpretation derives both population identity and generation dimensions from
 that value; the superseded producer revisions are intentionally unsupported.
+Detection uses `watermark-detection-v4`, which distinguishes calibrated
+p-value thresholds from empirical classifier operating points.
 
 Report rendering is downstream of the immutable metric Artifact:
 

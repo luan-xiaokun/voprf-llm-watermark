@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from analysis.render_report import main as render_report
-from analysis.report_io import export_csv, load_report
+from analysis.report_io import export_csv, flattened_rows, load_report
 
 
 def write_report(path: Path) -> Path:
@@ -56,7 +56,7 @@ def write_report(path: Path) -> Path:
     }
     (path / "manifest.json").write_text(
         json.dumps(
-            {"artifact_schema_revision": "experiment-report-v1"}
+            {"artifact_schema_revision": "experiment-report-v2"}
         ),
         encoding="utf-8",
     )
@@ -107,6 +107,39 @@ def test_report_csv_export_flattens_scientific_dimensions(tmp_path):
     assert rows[0]["positive_num"] == "1"
     assert "Qwen/Qwen2.5-14B" in rows[0]["evaluation_model"]
     assert rows[0]["source_artifacts"] == '["artifact_source"]'
+
+
+def test_report_exports_empirical_detection_operating_point():
+    row = {
+        "sample_id": "metric_upv",
+        "recipe": "tpr-vs-token-length",
+        "metric": "true_positive_rate",
+        "value": 0.5,
+        "dimensions": {
+            "scheme": "upv",
+            "detection_operating_point": {
+                "kind": "classifier-threshold",
+                "score_type": "classifier_confidence",
+                "decision_operator": ">",
+                "decision_threshold": 0.5,
+                "empirical_fpr": {
+                    "positive_num": 7920,
+                    "sample_num": 1_000_000,
+                    "rate": 0.00792,
+                },
+                "calibration": {"token_num": 255},
+            },
+        },
+        "population": {"sample_num": 2, "positive_num": 1},
+    }
+
+    flattened = flattened_rows([row])[0]
+
+    assert flattened["target_fpr"] is None
+    assert flattened["decision_threshold"] == 0.5
+    assert flattened["empirical_fpr"] == 0.00792
+    assert flattened["empirical_fpr_sample_num"] == 1_000_000
+    assert flattened["empirical_fpr_calibration_token_num"] == 255
 
 
 def test_report_renderer_consumes_artifact_without_path_discovery(tmp_path):

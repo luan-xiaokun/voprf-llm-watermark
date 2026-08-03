@@ -14,7 +14,7 @@ The module's external interface is deliberately small:
 
 ```text
 ordered source Artifacts + recipe + recipe parameters
-    -> experiment-report-v1 Artifact
+    -> experiment-report-v2 Artifact
 ```
 
 The implementation behind that interface owns schema validation, transitive
@@ -136,7 +136,7 @@ predictable.
 ### 3. Normalize sources behind Artifact Interpretation
 
 The initial internal catalog design was deepened into the read-only
-`artifact-interpretation-v1` module described in
+`artifact-interpretation-v2` module described in
 `docs/artifact-interpretation-plan.md`. It loads verified Artifacts, follows
 complete transitive lineage, validates exact kind/schema support and Lineage
 Invariants, and produces an `ArtifactInterpretation` containing:
@@ -158,6 +158,12 @@ cannot access raw paths, manifests, summaries, records, or ancestors, and
 Plan authors do not describe JSON paths. Watermark dimension normalization
 belongs in the existing scheme registry so Result Assembly does not recreate
 scheme-specific branch forests.
+
+Detection Metric Facts carry an explicit operating point. Calibrated detectors
+use p-value thresholds and a `target_fpr` axis. UPV instead uses its native
+`classifier_confidence > 0.5` decision; its report rows have no target-FPR
+claim and include the independently measured empirical FPR, exact calibration
+count, and calibration provenance.
 
 Joins prefer exact lineage over equality of labels:
 
@@ -187,7 +193,7 @@ and a small number of parameters.
 
 ### 5. Emit a long-form, versioned report Artifact
 
-`experiment-report-v1/records.jsonl` contains one metric observation per row:
+`experiment-report-v2/records.jsonl` contains one metric observation per row:
 
 ```json
 {
@@ -393,7 +399,7 @@ Tests:
 
 Exit criteria:
 
-- All six recipes produce `experiment-report-v1` Artifacts using CPU-only
+- All six recipes produce `experiment-report-v2` Artifacts using CPU-only
   tests.
 
 ### Phase 4 — Add report stages to the experiment Plans
@@ -455,7 +461,7 @@ Tasks:
 
 Exit criteria:
 
-- Renderer smoke tests consume fixture `experiment-report-v1` Artifacts.
+- Renderer smoke tests consume fixture `experiment-report-v2` Artifacts.
 - Changing an input path requires a CLI argument, not source editing.
 - The report rows used for every plotted point can be traced to source
   Artifact identities.

@@ -1,0 +1,23 @@
+{
+  "schema_revision": "upv-classifier-calibration-v1",
+  "kind": "classifier-threshold",
+  "score_type": "classifier_confidence",
+  "decision_operator": ">",
+  "decision_threshold": 0.5,
+  "empirical_fpr": {
+    "positive_num": 7920,
+    "sample_num": 1000000,
+    "rate": 0.00792
+  },
+  "private_detector_sha256": "f06cb07ed2813edd76d81160994f0a66c94bf5e9fc534e51dbabfdc50823ad7b",
+  "calibration": {
+    "dataset": "allenai/c4:realnewslike",
+    "split": "train",
+    "dataset_revision": null,
+    "tokenizer": "Qwen/Qwen2.5-0.5B",
+    "token_num": 255,
+    "sample_construction": "sequential non-overlapping token chunks",
+    "source_scores_sha256": "9c5002e460a7d32769d11d0a95f9856338090703b701eefa39fa0fbf4fc143f8",
+    "evaluation_script_sha256": "21baa3fcc0a773d277f2061d5546c63ce17f5e97adce052d20393b480bd911a0"
+  }
+}

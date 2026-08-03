@@ -14,7 +14,8 @@ class DetectionResult:
 
     Attributes:
         total_token_num: Total number of tokens processed.
-        p_value: The final p-value of the detection test.
+        p_value: The final p-value of the detection test, or ``None`` when
+            the detector exposes a non-probabilistic decision score.
         step_size: If incremental detection was requested, the step size used.
         milestones: List of token counts corresponding to incremental steps.
         step_p_values: List of p-values at each milestone.
@@ -22,7 +23,7 @@ class DetectionResult:
     """
 
     total_token_num: int
-    p_value: float
+    p_value: float | None
     step_size: int | None = None
     milestones: list[int] | None = None
     step_p_values: list[float] | None = None

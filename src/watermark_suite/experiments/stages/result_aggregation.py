@@ -19,7 +19,7 @@ from .common import require
 class ResultAggregationStageAdapter:
     kind = "result-aggregation"
     revision = (
-        f"result-aggregation-v2+{ARTIFACT_INTERPRETATION_REVISION}"
+        f"result-aggregation-v3+{ARTIFACT_INTERPRETATION_REVISION}"
     )
     accepted_settings = {
         "recipe",
@@ -74,7 +74,7 @@ class ResultAggregationStageAdapter:
             settings=dict(settings),
             semantic_settings=semantic,
             execution_settings={},
-            artifact_schema_revision="experiment-report-v1",
+            artifact_schema_revision="experiment-report-v2",
             resource_key="cpu:result-aggregation",
         )
 

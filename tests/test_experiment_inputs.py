@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
@@ -12,6 +13,32 @@ from watermark_suite.experiments.runtime import (
 )
 from watermark_suite.experiments.scheme_registry import WATERMARK_SCHEMES
 from watermark_suite.experiments.stages.common import resolve_model
+
+
+def _write_upv_calibration(path, private_detector):
+    calibration = {
+        "schema_revision": "upv-classifier-calibration-v1",
+        "kind": "classifier-threshold",
+        "score_type": "classifier_confidence",
+        "decision_operator": ">",
+        "decision_threshold": 0.5,
+        "empirical_fpr": {
+            "positive_num": 7920,
+            "sample_num": 1_000_000,
+            "rate": 0.00792,
+        },
+        "private_detector_sha256": hashlib.sha256(
+            private_detector.read_bytes()
+        ).hexdigest(),
+        "calibration": {
+            "dataset": "allenai/c4:realnewslike",
+            "split": "train",
+            "tokenizer": "Qwen/Qwen2.5-0.5B",
+            "token_num": 255,
+        },
+    }
+    path.write_text(json.dumps(calibration), encoding="utf-8")
+    return calibration
 
 
 def test_selected_sample_id_cannot_be_overridden_by_source_record(tmp_path):
@@ -126,10 +153,16 @@ def test_external_watermark_material_is_reverified(method, tmp_path):
         detector_dir.mkdir()
         for name in ("combine_model.pt", "private_detector.pt"):
             (detector_dir / name).write_bytes(name.encode())
+        calibration_path = tmp_path / "upv-calibration.json"
+        _write_upv_calibration(
+            calibration_path,
+            detector_dir / "private_detector.pt",
+        )
         settings = {
             "method": "upv",
             "enabled": True,
             "detector_dir": str(detector_dir),
+            "calibration_path": str(calibration_path),
             "window_size": 4,
             "delta": 2.0,
             "gamma": 0.5,
@@ -143,6 +176,38 @@ def test_external_watermark_material_is_reverified(method, tmp_path):
 
     with pytest.raises(ResolutionError, match="changed after Plan resolution"):
         WATERMARK_SCHEMES.verify(watermark)
+
+
+def test_upv_resolution_records_its_empirical_classifier_operating_point(
+    tmp_path,
+):
+    detector_dir = tmp_path / "upv"
+    detector_dir.mkdir()
+    for name in ("combine_model.pt", "private_detector.pt"):
+        (detector_dir / name).write_bytes(name.encode())
+    calibration_path = tmp_path / "upv-calibration.json"
+    calibration = _write_upv_calibration(
+        calibration_path,
+        detector_dir / "private_detector.pt",
+    )
+
+    resolved = WATERMARK_SCHEMES.resolve(
+        {
+            "method": "upv",
+            "enabled": True,
+            "detector_dir": str(detector_dir),
+            "calibration_path": str(calibration_path),
+            "window_size": 4,
+            "delta": 2.0,
+            "gamma": 0.5,
+            "bit_number": 18,
+            "layers": 5,
+            "beam_size": 0,
+        },
+        tmp_path,
+    )
+
+    assert resolved["detection_operating_point"] == calibration
 
 
 def test_pdw_run_semantics_identify_cache_safe_generation(tmp_path):

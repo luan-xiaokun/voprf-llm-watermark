@@ -168,7 +168,7 @@ def adaptive_forgery_curve(
 
 class DetectionStageAdapter:
     kind = "detection"
-    revision = "detection-v3"
+    revision = "detection-v4"
     accepted_settings = {
         "batch_size",
         "target_field",
@@ -211,7 +211,7 @@ class DetectionStageAdapter:
             settings=dict(settings),
             semantic_settings=semantic,
             execution_settings={"device": settings["device"]},
-            artifact_schema_revision="watermark-detection-v3",
+            artifact_schema_revision="watermark-detection-v4",
             resource_key="input-bound:detection",
         )
 
@@ -250,6 +250,12 @@ class DetectionStageAdapter:
                 )
             },
         }
+        if watermark.get("method") == "upv":
+            # UPV exposes a classifier decision rather than p-values. The
+            # fixed, calibrated operating point is carried by its detector
+            # material, so generic p-value thresholds are not semantic inputs
+            # to this bound Run.
+            semantic["significance_levels"] = []
         return ResolvedStageDefinition(
             settings={
                 **definition.settings,
@@ -409,87 +415,201 @@ class _DetectionExecution:
 
     def summarize(self, records: list[JsonObject]) -> JsonObject:
         levels = self.context.semantic_settings["significance_levels"]
-        p_values = [
-            float(record["detection"]["p_value"]) for record in records
-        ]
+        watermark = self.context.semantic_settings["watermark"]
         total_tokens = sum(
             int(record["detection"]["total_token_num"])
             for record in records
         )
-        rates = {
-            f"{level:.0e}": (
-                sum(value < level for value in p_values) / len(p_values)
-                if p_values
-                else 0.0
-            )
-            for level in levels
-        }
-        counts = {
-            f"{level:.0e}": {
-                "positive_num": sum(value < level for value in p_values),
-                "sample_num": len(p_values),
-            }
-            for level in levels
-        }
         rate_name = (
             "tpr"
-            if self.context.semantic_settings["watermark"]["enabled"]
+            if watermark["enabled"]
             else "fpr"
         )
         summary: JsonObject = {
             "sample_num": len(records),
-            "watermark": self.context.semantic_settings["watermark"],
-            "p_value_median": (
-                statistics.median(p_values) if p_values else None
-            ),
-            "p_value_distribution": _distribution(p_values),
-            "negative_log10_p_value_distribution": _distribution(
-                [
-                    -math.log10(max(value, sys.float_info.min))
-                    for value in p_values
-                ]
-            ),
-            "detection_rate": rates,
-            "detection_counts": counts,
-            rate_name: rates,
+            "watermark": watermark,
             "total_token_num": total_tokens,
             "mean_token_num": (
                 total_tokens / len(records) if records else 0.0
             ),
         }
-        milestone_values: dict[int, list[float]] = {}
-        for record in records:
-            detection = record["detection"]
-            milestones = detection.get("milestones") or []
-            step_p_values = detection.get("step_p_values") or []
-            for milestone, p_value in zip(milestones, step_p_values):
-                milestone_values.setdefault(int(milestone), []).append(
-                    float(p_value)
+        if watermark["method"] == "upv":
+            operating_point = watermark.get("detection_operating_point")
+            if not isinstance(operating_point, dict):
+                raise PlanValidationError(
+                    "UPV detection requires a resolved operating point"
                 )
-        if milestone_values:
-            summary["milestone_detection_rate"] = [
-                {
-                    "token_num": token_num,
-                    "eligible_sample_num": len(values),
-                    "detection_rate": {
-                        f"{level:.0e}": (
-                            sum(value < level for value in values)
-                            / len(values)
+            score_type = operating_point["score_type"]
+            threshold = float(operating_point["decision_threshold"])
+            operator = operating_point["decision_operator"]
+            operating_point_id = f"{score_type}{operator}{threshold:g}"
+            predictions = []
+            confidences = []
+            milestone_predictions: dict[int, list[bool]] = {}
+            for record in records:
+                detection = record["detection"]
+                confidence = float(detection["confidence"])
+                predicted = bool(detection["predicted"])
+                if (
+                    detection.get("p_value") is not None
+                    or detection.get("score_type") != score_type
+                    or float(detection["decision_threshold"]) != threshold
+                    or predicted != (confidence > threshold)
+                ):
+                    raise PlanValidationError(
+                        "UPV result disagrees with its classifier operating point"
+                    )
+                predictions.append(predicted)
+                confidences.append(confidence)
+                milestones = detection.get("milestones") or []
+                step_scores = detection.get("step_scores") or []
+                step_predictions = detection.get("step_predictions") or []
+                if not (
+                    len(milestones)
+                    == len(step_scores)
+                    == len(step_predictions)
+                ):
+                    raise PlanValidationError(
+                        "UPV milestone scores and decisions must align"
+                    )
+                for milestone, score, decision in zip(
+                    milestones,
+                    step_scores,
+                    step_predictions,
+                ):
+                    if bool(decision) != (float(score) > threshold):
+                        raise PlanValidationError(
+                            "UPV milestone decision disagrees with its score"
                         )
-                        for level in levels
+                    milestone_predictions.setdefault(
+                        int(milestone), []
+                    ).append(bool(decision))
+            positive_num = sum(predictions)
+            rates = {
+                operating_point_id: (
+                    positive_num / len(predictions) if predictions else 0.0
+                )
+            }
+            counts = {
+                operating_point_id: {
+                    "positive_num": positive_num,
+                    "sample_num": len(predictions),
+                }
+            }
+            summary.update(
+                {
+                    "detection_operating_points": {
+                        operating_point_id: operating_point,
                     },
-                    "detection_counts": {
+                    "classifier_confidence_distribution": _distribution(
+                        confidences
+                    ),
+                    "detection_rate": rates,
+                    "detection_counts": counts,
+                    rate_name: rates,
+                }
+            )
+            if milestone_predictions:
+                summary["milestone_detection_rate"] = [
+                    {
+                        "token_num": token_num,
+                        "eligible_sample_num": len(values),
+                        "detection_rate": {
+                            operating_point_id: sum(values) / len(values)
+                        },
+                        "detection_counts": {
+                            operating_point_id: {
+                                "positive_num": sum(values),
+                                "sample_num": len(values),
+                            }
+                        },
+                    }
+                    for token_num, values in sorted(
+                        milestone_predictions.items()
+                    )
+                ]
+        else:
+            p_values = [
+                float(record["detection"]["p_value"])
+                for record in records
+            ]
+            rates = {
+                f"{level:.0e}": (
+                    sum(value < level for value in p_values) / len(p_values)
+                    if p_values
+                    else 0.0
+                )
+                for level in levels
+            }
+            counts = {
+                f"{level:.0e}": {
+                    "positive_num": sum(value < level for value in p_values),
+                    "sample_num": len(p_values),
+                }
+                for level in levels
+            }
+            summary.update(
+                {
+                    "detection_operating_points": {
                         f"{level:.0e}": {
-                            "positive_num": sum(
-                                value < level for value in values
-                            ),
-                            "sample_num": len(values),
+                            "kind": "p-value-threshold",
+                            "score_type": "p_value",
+                            "decision_operator": "<",
+                            "decision_threshold": level,
+                            "target_fpr": level,
                         }
                         for level in levels
                     },
+                    "p_value_median": (
+                        statistics.median(p_values) if p_values else None
+                    ),
+                    "p_value_distribution": _distribution(p_values),
+                    "negative_log10_p_value_distribution": _distribution(
+                        [
+                            -math.log10(max(value, sys.float_info.min))
+                            for value in p_values
+                        ]
+                    ),
+                    "detection_rate": rates,
+                    "detection_counts": counts,
+                    rate_name: rates,
                 }
-                for token_num, values in sorted(milestone_values.items())
-            ]
+            )
+            milestone_values: dict[int, list[float]] = {}
+            for record in records:
+                detection = record["detection"]
+                milestones = detection.get("milestones") or []
+                step_p_values = detection.get("step_p_values") or []
+                for milestone, p_value in zip(milestones, step_p_values):
+                    milestone_values.setdefault(int(milestone), []).append(
+                        float(p_value)
+                    )
+            if milestone_values:
+                summary["milestone_detection_rate"] = [
+                    {
+                        "token_num": token_num,
+                        "eligible_sample_num": len(values),
+                        "detection_rate": {
+                            f"{level:.0e}": (
+                                sum(value < level for value in values)
+                                / len(values)
+                            )
+                            for level in levels
+                        },
+                        "detection_counts": {
+                            f"{level:.0e}": {
+                                "positive_num": sum(
+                                    value < level for value in values
+                                ),
+                                "sample_num": len(values),
+                            }
+                            for level in levels
+                        },
+                    }
+                    for token_num, values in sorted(
+                        milestone_values.items()
+                    )
+                ]
         if records and all(
             "adaptive_forgery" in record for record in records
         ):

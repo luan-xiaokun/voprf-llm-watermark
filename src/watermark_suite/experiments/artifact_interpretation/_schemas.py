@@ -190,6 +190,7 @@ def _facts_from_counts(
     metric: str,
     token_num: int | None = None,
     rates: object = None,
+    operating_points: object = None,
 ) -> list[_RawMetricFact]:
     if not isinstance(values, dict):
         raise ValueError(f"{metric} counts must be a mapping")
@@ -201,6 +202,15 @@ def _facts_from_counts(
             f"{metric} rate/count thresholds disagree: "
             f"rates={sorted(rates)}, counts={sorted(values)}"
         )
+    if operating_points is not None:
+        if not isinstance(operating_points, dict):
+            raise ValueError("detection_operating_points must be a mapping")
+        if set(operating_points) != set(values):
+            raise ValueError(
+                f"{metric} operating-point/count identifiers disagree: "
+                f"operating_points={sorted(operating_points)}, "
+                f"counts={sorted(values)}"
+            )
     for threshold, count_value in values.items():
         if not isinstance(count_value, dict):
             raise ValueError(f"{metric} count for {threshold} must be a mapping")
@@ -208,9 +218,75 @@ def _facts_from_counts(
             sample_num=int(count_value["sample_num"]),
             positive_num=int(count_value["positive_num"]),
         )
-        target_fpr = float(threshold)
-        if not 0 < target_fpr < 1:
-            raise ValueError("target FPR must be between zero and one")
+        operating_point = None
+        if isinstance(operating_points, dict):
+            raw_operating_point = operating_points[threshold]
+            if not isinstance(raw_operating_point, dict):
+                raise ValueError(
+                    f"detection operating point {threshold!r} must be a mapping"
+                )
+            operating_point = dict(raw_operating_point)
+            kind = operating_point.get("kind")
+            score_type = operating_point.get("score_type")
+            operator = operating_point.get("decision_operator")
+            decision_threshold = operating_point.get("decision_threshold")
+            if (
+                kind not in {"p-value-threshold", "classifier-threshold"}
+                or not isinstance(score_type, str)
+                or operator not in {"<", ">"}
+                or not isinstance(decision_threshold, (int, float))
+                or isinstance(decision_threshold, bool)
+                or not math.isfinite(float(decision_threshold))
+            ):
+                raise ValueError(
+                    f"detection operating point {threshold!r} is invalid"
+                )
+            target_value = operating_point.get("target_fpr")
+            target_fpr = (
+                float(target_value) if target_value is not None else None
+            )
+            if kind == "p-value-threshold":
+                if (
+                    score_type != "p_value"
+                    or operator != "<"
+                    or target_fpr is None
+                    or not 0 < target_fpr < 1
+                ):
+                    raise ValueError(
+                        "p-value operating points require a target FPR"
+                    )
+            else:
+                if target_fpr is not None:
+                    raise ValueError(
+                        "classifier operating points cannot claim target FPR"
+                    )
+                empirical = operating_point.get("empirical_fpr")
+                if not isinstance(empirical, dict):
+                    raise ValueError(
+                        "classifier operating points require empirical_fpr"
+                    )
+                empirical_count = ExactCount(
+                    sample_num=int(empirical["sample_num"]),
+                    positive_num=int(empirical["positive_num"]),
+                )
+                empirical_rate = (
+                    empirical_count.positive_num / empirical_count.sample_num
+                    if empirical_count.sample_num
+                    else -1.0
+                )
+                if not math.isclose(
+                    float(empirical["rate"]),
+                    empirical_rate,
+                    rel_tol=0.0,
+                    abs_tol=1e-15,
+                ):
+                    raise ValueError(
+                        "empirical FPR disagrees with its exact counts"
+                    )
+        else:
+            target_fpr = float(threshold)
+            if not 0 < target_fpr < 1:
+                raise ValueError("target FPR must be between zero and one")
         value = (
             count.positive_num / count.sample_num
             if count.sample_num
@@ -234,6 +310,7 @@ def _facts_from_counts(
                 value=value,
                 token_num=token_num,
                 target_fpr=target_fpr,
+                detection_operating_point=operating_point,
                 count=count,
             )
         )
@@ -464,10 +541,12 @@ def _parse_detection(
     path: tuple[str, ...],
 ) -> _ParsedArtifact:
     del issues, root, path
+    operating_points = summary.get("detection_operating_points")
     facts = _facts_from_counts(
         summary.get("detection_counts"),
         metric="detection_rate",
         rates=summary.get("detection_rate"),
+        operating_points=operating_points,
     )
     sample_num = int(summary["sample_num"])
     for metric, field in (
@@ -510,6 +589,7 @@ def _parse_detection(
             metric="detection_rate",
             token_num=token_num,
             rates=milestone.get("detection_rate"),
+            operating_points=operating_points,
         )
         if any(
             fact.count is not None
@@ -526,6 +606,7 @@ def _parse_detection(
     scalar_distributions = {
         "p_value": "p_value_distribution",
         "negative_log10_p_value": "negative_log10_p_value_distribution",
+        "classifier_confidence": "classifier_confidence_distribution",
         "green_token_count": "green_token_count_distribution",
         "effective_token_count": "effective_token_count_distribution",
         "oracle_query_count": "oracle_query_count_distribution",
@@ -796,6 +877,7 @@ def _sample_fact(
     number = float(value)
     if metric in {
         "p_value",
+        "classifier_confidence",
         "selected_green_ratio",
         "fallback_ratio",
         "cache_hit_ratio",
@@ -863,10 +945,11 @@ def _stream_records(
             if isinstance(detection, dict):
                 for metric, field in (
                     ("p_value", "p_value"),
+                    ("classifier_confidence", "confidence"),
                     ("green_token_count", "green_token_num"),
                     ("effective_token_count", "effective_token_num"),
                 ):
-                    if field in detection:
+                    if detection.get(field) is not None:
                         values.append((metric, detection[field]))
         elif kind == "robustness":
             robustness = record.get("robustness", {})
@@ -878,10 +961,11 @@ def _stream_records(
             detection = record.get("detection", {})
             for metric, field in (
                 ("p_value", "p_value"),
+                ("classifier_confidence", "confidence"),
                 ("green_token_count", "green_token_num"),
                 ("effective_token_count", "effective_token_num"),
             ):
-                if field in detection:
+                if detection.get(field) is not None:
                     values.append((metric, detection[field]))
         elif kind == "perplexity":
             quality = record.get("quality", {})
@@ -938,9 +1022,9 @@ schema_registry: dict[tuple[str, str], _SchemaAdapter] = {
         _parse_robustness,
         _stream_records,
     ),
-    ("detection", "watermark-detection-v3"): _SchemaAdapter(
+    ("detection", "watermark-detection-v4"): _SchemaAdapter(
         "detection",
-        "watermark-detection-v3",
+        "watermark-detection-v4",
         _parse_detection,
         _stream_records,
     ),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -168,6 +170,7 @@ def _resolve_pdw(value: JsonObject, repository: Path) -> JsonObject:
 
 def _resolve_upv(value: JsonObject, repository: Path) -> JsonObject:
     required = {
+        "calibration_path",
         "detector_dir",
         "window_size",
         "delta",
@@ -203,6 +206,74 @@ def _resolve_upv(value: JsonObject, repository: Path) -> JsonObject:
                 f"UPV detector material does not exist: {path}"
             )
         resolved[f"{name}_sha256"] = sha256_file(path)
+    calibration_path, calibration_digest = _file(
+        value["calibration_path"],
+        repository,
+        label="UPV classifier calibration",
+    )
+    try:
+        calibration = json.loads(
+            Path(calibration_path).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise ResolutionError(
+            f"UPV classifier calibration is invalid: {calibration_path}"
+        ) from error
+    if not isinstance(calibration, dict):
+        raise PlanValidationError("UPV classifier calibration must be a mapping")
+    if (
+        calibration.get("schema_revision")
+        != "upv-classifier-calibration-v1"
+        or calibration.get("kind") != "classifier-threshold"
+        or calibration.get("score_type") != "classifier_confidence"
+        or calibration.get("decision_operator") != ">"
+        or calibration.get("decision_threshold") != 0.5
+    ):
+        raise PlanValidationError(
+            "UPV classifier calibration must declare the fixed "
+            "classifier_confidence > 0.5 operating point"
+        )
+    empirical = calibration.get("empirical_fpr")
+    if not isinstance(empirical, dict):
+        raise PlanValidationError(
+            "UPV classifier calibration lacks empirical_fpr"
+        )
+    try:
+        positive_num = int(empirical["positive_num"])
+        sample_num = int(empirical["sample_num"])
+        rate = float(empirical["rate"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise PlanValidationError(
+            "UPV empirical_fpr requires positive_num, sample_num, and rate"
+        ) from error
+    expected_rate = positive_num / sample_num if sample_num else -1.0
+    if (
+        sample_num <= 0
+        or positive_num < 0
+        or positive_num > sample_num
+        or not math.isclose(rate, expected_rate, rel_tol=0.0, abs_tol=1e-15)
+    ):
+        raise PlanValidationError(
+            "UPV empirical_fpr rate disagrees with its exact counts"
+        )
+    if (
+        calibration.get("private_detector_sha256")
+        != resolved["private_detector.pt_sha256"]
+    ):
+        raise PlanValidationError(
+            "UPV calibration was not measured with private_detector.pt"
+        )
+    if not isinstance(calibration.get("calibration"), dict):
+        raise PlanValidationError(
+            "UPV classifier calibration lacks calibration provenance"
+        )
+    resolved.update(
+        {
+            "calibration_path": calibration_path,
+            "calibration_path_sha256": calibration_digest,
+            "detection_operating_point": calibration,
+        }
+    )
     return resolved
 
 
@@ -235,6 +306,11 @@ def _verify_upv(value: JsonObject) -> None:
             value[f"{name}_sha256"],
             label=f"UPV {name}",
         )
+    _verify_file(
+        Path(value["calibration_path"]),
+        value["calibration_path_sha256"],
+        label="UPV classifier calibration",
+    )
 
 
 def _vow_seed(value: JsonObject) -> bytes:
@@ -559,6 +635,7 @@ WATERMARK_SCHEMES = WatermarkSchemeRegistry(
         "upv": _SchemeDefinition(
             _COMMON
             | {
+                "calibration_path",
                 "detector_dir",
                 "window_size",
                 "delta",

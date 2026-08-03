@@ -65,9 +65,9 @@ def load_report(
 ) -> ReportArtifact:
     path = resolve_report_path(value, workspace=workspace)
     manifest = _object(path / "manifest.json")
-    if manifest.get("artifact_schema_revision") != "experiment-report-v1":
+    if manifest.get("artifact_schema_revision") != "experiment-report-v2":
         raise ValueError(
-            f"{path} is not an experiment-report-v1 Artifact"
+            f"{path} is not an experiment-report-v2 Artifact"
         )
     summary = _object(path / "summary.json")
     records = _records(path / "records.jsonl")
@@ -101,6 +101,9 @@ def flattened_rows(records: Iterable[dict]) -> list[dict]:
         dimensions = record.get("dimensions") or {}
         population = record.get("population") or {}
         uncertainty = record.get("uncertainty") or {}
+        operating_point = dimensions.get("detection_operating_point") or {}
+        empirical_fpr = operating_point.get("empirical_fpr") or {}
+        calibration = operating_point.get("calibration") or {}
         result.append(
             {
                 "sample_id": record.get("sample_id"),
@@ -128,6 +131,24 @@ def flattened_rows(records: Iterable[dict]) -> list[dict]:
                 "task": dimensions.get("task"),
                 "token_num": dimensions.get("token_num"),
                 "target_fpr": dimensions.get("target_fpr"),
+                "detection_operating_point": _json(operating_point),
+                "score_type": operating_point.get("score_type"),
+                "decision_operator": operating_point.get(
+                    "decision_operator"
+                ),
+                "decision_threshold": operating_point.get(
+                    "decision_threshold"
+                ),
+                "empirical_fpr": empirical_fpr.get("rate"),
+                "empirical_fpr_sample_num": empirical_fpr.get(
+                    "sample_num"
+                ),
+                "empirical_fpr_positive_num": empirical_fpr.get(
+                    "positive_num"
+                ),
+                "empirical_fpr_calibration_token_num": calibration.get(
+                    "token_num"
+                ),
                 "sample_num": population.get("sample_num"),
                 "positive_num": population.get("positive_num"),
                 "uncertainty_method": uncertainty.get("method"),
@@ -166,6 +187,14 @@ def export_markdown(report: ReportArtifact, path: Path) -> None:
             "value": row["value"],
             "token_num": row["token_num"],
             "target_fpr": row["target_fpr"],
+            "decision_threshold": row["decision_threshold"],
+            "empirical_fpr": row["empirical_fpr"],
+            "empirical_fpr_sample_num": row[
+                "empirical_fpr_sample_num"
+            ],
+            "empirical_fpr_calibration_token_num": row[
+                "empirical_fpr_calibration_token_num"
+            ],
             "sample_num": row["sample_num"],
             "positive_num": row["positive_num"],
         }

@@ -202,12 +202,21 @@ def detection(
         root,
         name,
         kind="detection",
-        schema="watermark-detection-v3",
+        schema="watermark-detection-v4",
         semantic={"watermark": watermark},
         sources=(source,),
         records=records,
         summary={
             "sample_num": 2,
+            "detection_operating_points": {
+                "1e-05": {
+                    "kind": "p-value-threshold",
+                    "score_type": "p_value",
+                    "decision_operator": "<",
+                    "decision_threshold": 0.00001,
+                    "target_fpr": 0.00001,
+                }
+            },
             "detection_rate": {"1e-05": rate},
             "detection_counts": {
                 "1e-05": {"positive_num": 1, "sample_num": 2},
@@ -423,7 +432,7 @@ def test_supports_exact_current_kind_schema_pairs(tmp_path):
         ("generation", "generated-text-v3"),
         ("adaptive-forgery", "adaptive-forgery-v2"),
         ("robustness", "robustness-text-v2"),
-        ("detection", "watermark-detection-v3"),
+        ("detection", "watermark-detection-v4"),
         ("perplexity", "conditional-perplexity-v2"),
         ("text-evaluation", "text-evaluation-v1"),
         ("downstream", "gsm8k-evaluation-v2"),

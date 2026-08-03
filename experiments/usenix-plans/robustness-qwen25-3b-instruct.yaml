@@ -1,9 +1,9 @@
 version: 1
-name: robustness-qwen25-7b-instruct
+name: robustness-qwen25-3b-instruct
 
 models:
   qwen-instruct:
-    checkpoint: Qwen/Qwen2.5-7B-Instruct
+    checkpoint: Qwen/Qwen2.5-3B-Instruct
   similarity-encoder:
     checkpoint: sentence-transformers/all-mpnet-base-v2
 
@@ -27,7 +27,7 @@ stages:
     model: qwen-instruct
     dataset: eli5-robustness
     num_samples: 1000
-    batch_size: 8
+    batch_size: 32
     seed: 42
     max_new_tokens: 600
     do_sample: true
@@ -91,7 +91,7 @@ stages:
   transform_robustness:
     kind: robustness
     input: generate_robustness
-    batch_size: 8
+    batch_size: 16
     target_field: generated_text
     seed: 42
     sweep:
@@ -108,7 +108,7 @@ stages:
             its information and approximate length. Return only the rewritten
             text.
         - method: openai-paraphrase
-          model: gpt-5.6-sol
+          model: gpt-5.6-luna
           max_output_tokens: 600
           temperature: 0.7
           reasoning_effort: low
@@ -142,7 +142,7 @@ stages:
     model: qwen-instruct
     dataset: eli5-robustness
     num_samples: 1000
-    batch_size: 8
+    batch_size: 16
     seed: 42
     max_new_tokens: 600
     do_sample: true
@@ -189,7 +189,7 @@ stages:
             its information and approximate length. Return only the rewritten
             text.
         - method: openai-paraphrase
-          model: gpt-5.6-sol
+          model: gpt-5.6-luna
           max_output_tokens: 600
           temperature: 0.7
           reasoning_effort: low

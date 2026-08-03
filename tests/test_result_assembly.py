@@ -42,6 +42,36 @@ VOW = {
     "delta": 2.5,
     "naive_baseline": False,
 }
+UPV_OPERATING_POINT = {
+    "schema_revision": "upv-classifier-calibration-v1",
+    "kind": "classifier-threshold",
+    "score_type": "classifier_confidence",
+    "decision_operator": ">",
+    "decision_threshold": 0.5,
+    "empirical_fpr": {
+        "positive_num": 7920,
+        "sample_num": 1_000_000,
+        "rate": 0.00792,
+    },
+    "private_detector_sha256": "private-detector",
+    "calibration": {
+        "dataset": "allenai/c4:realnewslike",
+        "split": "train",
+        "tokenizer": "Qwen/Qwen2.5-0.5B",
+        "token_num": 255,
+    },
+}
+UPV = {
+    "method": "upv",
+    "enabled": True,
+    "window_size": 4,
+    "gamma": 0.5,
+    "delta": 2.0,
+    "bit_number": 18,
+    "layers": 5,
+    "beam_size": 0,
+    "detection_operating_point": UPV_OPERATING_POINT,
+}
 NONE = {"method": "none", "enabled": False}
 DATASET = {
     "kind": "c4",
@@ -160,12 +190,28 @@ def detection(
         root,
         name,
         kind="detection",
-        schema="watermark-detection-v3",
+        schema="watermark-detection-v4",
         semantic={"watermark": watermark},
         sources=(source,),
         summary={
             "sample_num": 2,
             "watermark": watermark,
+            "detection_operating_points": {
+                "1e-05": {
+                    "kind": "p-value-threshold",
+                    "score_type": "p_value",
+                    "decision_operator": "<",
+                    "decision_threshold": 0.00001,
+                    "target_fpr": 0.00001,
+                },
+                "1e-02": {
+                    "kind": "p-value-threshold",
+                    "score_type": "p_value",
+                    "decision_operator": "<",
+                    "decision_threshold": 0.01,
+                    "target_fpr": 0.01,
+                },
+            },
             "detection_counts": {
                 "1e-05": {"positive_num": positive, "sample_num": 2},
                 "1e-02": {"positive_num": positive, "sample_num": 2},
@@ -183,6 +229,56 @@ def detection(
                             "positive_num": positive,
                             "sample_num": 2,
                         },
+                    },
+                }
+            ],
+        },
+    )
+
+
+def upv_detection(
+    root: Path,
+    name: str,
+    source: ArtifactRef,
+) -> ArtifactRef:
+    operating_point_id = "classifier_confidence>0.5"
+    return artifact(
+        root,
+        name,
+        kind="detection",
+        schema="watermark-detection-v4",
+        semantic={"watermark": UPV},
+        sources=(source,),
+        summary={
+            "sample_num": 2,
+            "watermark": UPV,
+            "detection_operating_points": {
+                operating_point_id: UPV_OPERATING_POINT,
+            },
+            "detection_rate": {operating_point_id: 0.5},
+            "detection_counts": {
+                operating_point_id: {
+                    "positive_num": 1,
+                    "sample_num": 2,
+                },
+            },
+            "classifier_confidence_distribution": {
+                "count": 2,
+                "mean": 0.5,
+                "median": 0.5,
+                "min": 0.1,
+                "max": 0.9,
+            },
+            "milestone_detection_rate": [
+                {
+                    "token_num": 100,
+                    "eligible_sample_num": 2,
+                    "detection_rate": {operating_point_id: 0.5},
+                    "detection_counts": {
+                        operating_point_id: {
+                            "positive_num": 1,
+                            "sample_num": 2,
+                        }
                     },
                 }
             ],
@@ -346,6 +442,34 @@ def test_tpr_token_report_emits_exact_counts_and_uncertainty(tmp_path):
     assert rows[0]["dimensions"]["target_fpr"] == 0.00001
     assert rows[0]["uncertainty"]["method"] == "wilson"
     assert summary["source_artifacts"] == ["artifact_detected"]
+
+
+def test_upv_tpr_report_uses_its_empirical_classifier_operating_point(
+    tmp_path,
+):
+    generated = generation(tmp_path, "generated_upv", UPV)
+    detected = upv_detection(tmp_path, "detected_upv", generated)
+
+    rows, summary = assemble_stage(
+        tmp_path,
+        (generated, detected),
+        (detected,),
+        recipe="tpr-vs-token-length",
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["value"] == 0.5
+    assert row["dimensions"]["target_fpr"] is None
+    operating_point = row["dimensions"]["detection_operating_point"]
+    assert operating_point["score_type"] == "classifier_confidence"
+    assert operating_point["decision_threshold"] == 0.5
+    assert operating_point["empirical_fpr"] == {
+        "positive_num": 7920,
+        "sample_num": 1_000_000,
+        "rate": 0.00792,
+    }
+    assert summary["detection_operating_points"] == [UPV_OPERATING_POINT]
 
 
 def test_tpr_ppl_report_joins_by_lineage_and_keeps_baseline(tmp_path):

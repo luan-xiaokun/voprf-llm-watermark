@@ -32,12 +32,24 @@ def _scheme_label(row: dict) -> str:
             f"VOW h={parameters.get('window_size')}, "
             f"γ={parameters.get('gamma')}, δ={parameters.get('delta')}"
         )
-    return str(method).replace("hash", "Hash").upper() if method == "rdf" else (
+    label = str(method).replace("hash", "Hash").upper() if method == "rdf" else (
         str(method).replace("lefthash", "LeftHash")
         .replace("selfhash", "SelfHash")
         .replace("upv", "UPV")
         .replace("pdw", "PDW")
     )
+    operating_point = dimensions.get("detection_operating_point") or {}
+    empirical_fpr = operating_point.get("empirical_fpr") or {}
+    if empirical_fpr.get("rate") is not None:
+        token_num = (operating_point.get("calibration") or {}).get(
+            "token_num"
+        )
+        suffix = f"@{token_num}" if token_num is not None else ""
+        label += (
+            f" (empirical FPR{suffix}="
+            f"{float(empirical_fpr['rate']):.3g})"
+        )
+    return label
 
 
 def _pyplot():
@@ -205,7 +217,7 @@ def main(
     expected_recipe: str | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
-        description="Render or export an experiment-report-v1 Artifact."
+        description="Render or export an experiment-report-v2 Artifact."
     )
     parser.add_argument("artifact")
     parser.add_argument(

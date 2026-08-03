@@ -57,6 +57,7 @@ stages:
           method: upv
           enabled: true
           detector_dir: experiments/upv_baseline/model
+          calibration_path: experiments/upv_baseline/private_detector_calibration.json
           window_size: 4
           gamma: 0.5
           delta: 2.0

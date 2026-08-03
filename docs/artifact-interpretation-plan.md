@@ -11,7 +11,7 @@ Implementation result:
 - eager aggregate and filtered streaming Sample Metric Facts;
 - atomic cutover of all six Result recipes and removal of the old catalog
   seam;
-- `artifact-interpretation-v1` included in aggregation Run revision and
+- `artifact-interpretation-v2` included in aggregation Run revision and
   report summaries;
 - all recipe paths covered through the real `result-aggregation` stage.
 
@@ -75,7 +75,7 @@ Responsibility is split as follows:
 10. Metric Facts use one small, constrained shape rather than a class per
     metric.
 11. `ArtifactCatalog` is removed from the caller interface.
-12. Version 1 uses one global `artifact-interpretation-v1` revision.
+12. Version 2 uses one global `artifact-interpretation-v2` revision.
 13. The cutover is atomic across all six Result recipes.
 14. Old tests tied to raw JSON shapes are replaced rather than retained.
 
@@ -135,14 +135,14 @@ choose joins without reading manifests.
 
 ## Supported Schema Adapters
 
-Version 1 supports exactly the current schema pairs:
+Version 2 supports exactly the current schema pairs:
 
 | Artifact kind | Schema revision | Interpretation responsibilities |
 | --- | --- | --- |
 | `generation` | `generated-text-v3` | Population, generation model, decoding, prompt, seed, repetitions, Scheme identity |
 | `adaptive-forgery` | `adaptive-forgery-v2` | Generation/forgery provenance, aggregate cost and green-selection facts, streamed per-Sample forge facts |
 | `robustness` | `robustness-text-v2` | Transformation identity, inherited generation/Scheme facts, length and remote-call aggregate facts, streamed transformed-Sample facts |
-| `detection` | `watermark-detection-v3` | Exact detection counts, token milestones, p-value/green distributions, adaptive-forgery curve facts, streamed per-Sample detection facts |
+| `detection` | `watermark-detection-v4` | Exact detection counts, token milestones, explicit p-value or classifier operating points, p-value/confidence/green distributions, adaptive-forgery curve facts, streamed per-Sample detection facts |
 | `perplexity` | `conditional-perplexity-v2` | Evaluation model, conditional PPL, token/quality distributions, cost correlations, streamed per-Sample quality facts |
 | `text-evaluation` | `text-evaluation-v1` | Embedding model, similarity and diversity facts, streamed per-Sample similarity facts where present |
 | `downstream` | `gsm8k-evaluation-v2` | Task/model/prompt policy, exact accuracy count, streamed per-Sample correctness facts |
@@ -182,7 +182,11 @@ Always validate:
 
 - finite values where the metric requires finiteness;
 - probability/rate values in `[0, 1]`;
-- p-values in `[0, 1]` and target FPR values in `(0, 1)`;
+- p-values and classifier confidences in `[0, 1]`, with target FPR values in
+  `(0, 1)` only for p-value operating points;
+- classifier decisions with an explicit score, operator, threshold, empirical
+  FPR exact count, and calibration provenance; classifier operating points
+  cannot claim a target FPR;
 - non-negative token lengths and query counts;
 - `0 <= positive_num <= sample_num`;
 - stored rates equal their exact count ratio within one documented tolerance;
@@ -316,7 +320,7 @@ Tasks:
 
 1. Have the aggregation stage construct one Interpretation Set from its
    ordered source Artifacts.
-2. Include `artifact-interpretation-v1` in the aggregation adapter revision
+2. Include `artifact-interpretation-v2` in the aggregation adapter revision
    used by Run Identity.
 3. Rewrite all six recipes to consume interpretations, Metric Facts, and
    Artifact Relations only.

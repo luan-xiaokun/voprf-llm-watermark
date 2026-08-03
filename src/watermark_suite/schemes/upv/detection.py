@@ -19,7 +19,10 @@ from .watermarking import get_detector_model
 @dataclass
 class UPVDetectionResult(DetectionResult):
     confidence: float
+    score_type: str
+    decision_threshold: float
     predicted: bool
+    step_predictions: list[bool] | None = None
     green_token_mask: list[bool] | None = None
 
 
@@ -80,6 +83,8 @@ def get_detector_model(bits_num, b_layers, model_dir):
 
 
 class UPVDetector(WatermarkDetector):
+    decision_threshold = 0.5
+
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
@@ -122,6 +127,7 @@ class UPVDetector(WatermarkDetector):
         milestones = None
         step_p_values = None
         step_scores = None
+        step_predictions = None
 
         if step_size is not None and step_size > 0:
             outputs = self.provider_detector_model(inputs_tensor, return_sequence=True)
@@ -132,7 +138,9 @@ class UPVDetector(WatermarkDetector):
                 indices = [m - 1 for m in milestones]
                 selected_outputs = outputs[indices]
                 step_scores = selected_outputs.tolist()
-                step_p_values = [(1.0 - s) for s in step_scores]
+                step_predictions = [
+                    score > self.decision_threshold for score in step_scores
+                ]
 
             confidence = outputs[-1].item()
         else:
@@ -140,7 +148,7 @@ class UPVDetector(WatermarkDetector):
             outputs = outputs.reshape([-1])
             confidence = outputs.item()
 
-        predicted = confidence > 0.5
+        predicted = confidence > self.decision_threshold
 
         green_token_mask = None
         if return_green_token_mask:
@@ -159,13 +167,16 @@ class UPVDetector(WatermarkDetector):
 
         return UPVDetectionResult(
             confidence=confidence,
+            score_type="classifier_confidence",
+            decision_threshold=self.decision_threshold,
             predicted=predicted,
             total_token_num=token_num,
-            p_value=1 - confidence,
+            p_value=None,
             step_size=step_size,
             milestones=milestones,
             step_p_values=step_p_values,
             step_scores=step_scores,
+            step_predictions=step_predictions,
             green_token_mask=green_token_mask,
         )
 

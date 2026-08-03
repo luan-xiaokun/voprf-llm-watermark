@@ -60,7 +60,7 @@ def _wilson(
 class ResultAssembler:
     """Join interpreted scientific facts into recipe-specific report rows."""
 
-    revision = f"result-assembly-v2+{ARTIFACT_INTERPRETATION_REVISION}"
+    revision = f"result-assembly-v3+{ARTIFACT_INTERPRETATION_REVISION}"
 
     def __init__(
         self,
@@ -135,6 +135,50 @@ class ResultAssembler:
                 f"Artifact {artifact.identity.value} must provide exactly one "
                 f"{metric!r} fact for token_axis={token_axis!r}, "
                 f"target_fpr={target_fpr!r}; found {len(facts)}"
+            )
+        return facts[0]
+
+    def _detection_facts(
+        self,
+        artifact: ArtifactInterpretation,
+        *,
+        token_axis: bool,
+    ) -> tuple[MetricFact, ...]:
+        if artifact.dimensions.scheme != "upv":
+            return self._facts(
+                artifact,
+                "detection_rate",
+                token_axis=token_axis,
+                target_fpr=self._threshold(artifact),
+            )
+        return tuple(
+            fact
+            for fact in self._facts(
+                artifact,
+                "detection_rate",
+                token_axis=token_axis,
+            )
+            if (
+                fact.dimensions.detection_operating_point or {}
+            ).get("kind")
+            == "classifier-threshold"
+        )
+
+    def _one_detection_fact(
+        self,
+        artifact: ArtifactInterpretation,
+        *,
+        token_axis: bool,
+    ) -> MetricFact:
+        facts = self._detection_facts(
+            artifact,
+            token_axis=token_axis,
+        )
+        if len(facts) != 1:
+            raise PlanValidationError(
+                f"Artifact {artifact.identity.value} must provide exactly "
+                "one selected detection operating point for "
+                f"token_axis={token_axis!r}; found {len(facts)}"
             )
         return facts[0]
 
@@ -263,17 +307,11 @@ class ResultAssembler:
         self._require_comparable_generation(artifacts, recipe=recipe)
         rows = []
         for artifact in artifacts:
-            threshold = self._threshold(artifact)
-            facts = self._facts(
-                artifact,
-                "detection_rate",
-                token_axis=True,
-                target_fpr=threshold,
-            )
+            facts = self._detection_facts(artifact, token_axis=True)
             if not facts:
                 raise PlanValidationError(
                     f"Artifact {artifact.identity.value} has no token-level "
-                    f"detection facts at target FPR {threshold}"
+                    "detection facts at its selected operating point"
                 )
             rows.extend(
                 self._row(
@@ -357,11 +395,9 @@ class ResultAssembler:
                     f"PPL Artifact {ppl.identity.value} and detection "
                     f"{detection.identity.value} disagree on scheme"
                 )
-            fact = self._one_fact(
+            fact = self._one_detection_fact(
                 detection,
-                "detection_rate",
                 token_axis=False,
-                target_fpr=self._threshold(detection),
             )
             rows.append(
                 self._row(
@@ -460,17 +496,11 @@ class ResultAssembler:
                         "detection evaluation"
                     )
                 transformed_detections[source] = artifact
-            threshold = self._threshold(artifact)
-            facts = self._facts(
-                artifact,
-                "detection_rate",
-                token_axis=True,
-                target_fpr=threshold,
-            )
+            facts = self._detection_facts(artifact, token_axis=True)
             if not facts:
                 raise PlanValidationError(
                     f"Artifact {artifact.identity.value} has no token-level "
-                    f"detection facts at target FPR {threshold}"
+                    "detection facts at its selected operating point"
                 )
             rows.extend(
                 self._row(
@@ -689,6 +719,19 @@ class ResultAssembler:
             schema_counts[artifact.schema_revision] = (
                 schema_counts.get(artifact.schema_revision, 0) + 1
             )
+        operating_points: dict[str, JsonObject] = {}
+        for row in rows:
+            value = row.get("dimensions", {}).get(
+                "detection_operating_point"
+            )
+            if isinstance(value, dict):
+                key = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                operating_points[key] = value
         summary = {
             "recipe": recipe,
             "recipe_revision": self.revision,
@@ -701,6 +744,9 @@ class ResultAssembler:
             "metric_row_num": len(rows),
             "metrics": sorted({row["metric"] for row in rows}),
             "threshold_policy": self.threshold_policy,
+            "detection_operating_points": [
+                operating_points[key] for key in sorted(operating_points)
+            ],
             "confidence_level": self.confidence_level,
             "compatibility": {"status": "passed"},
         }

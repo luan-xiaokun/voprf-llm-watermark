@@ -201,7 +201,7 @@ def test_usenix_forgery_plan_matches_the_table_design(monkeypatch):
     assert all(
         stage.semantic_settings["model"]["checkpoint"]
         == "Qwen/Qwen2.5-3B-Instruct"
-        and stage.semantic_settings["max_new_tokens"] == 350
+        and stage.semantic_settings["max_new_tokens"] == 1024
         and stage.semantic_settings["target_scored_pairs"] == 300
         and stage.semantic_settings["prompt_population"]["dataset"][
             "selection"

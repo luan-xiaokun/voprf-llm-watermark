@@ -360,6 +360,7 @@ def _base(
     transformation: bool = False,
     task: bool = False,
     inherited_model: bool = False,
+    detector_scheme: bool = False,
     evaluation_model_field: str | None = None,
     facts: tuple[_RawMetricFact, ...] = (),
 ) -> _ParsedArtifact:
@@ -371,6 +372,9 @@ def _base(
         if evaluation_model_field
         else None
     )
+    detector_value = semantic.get("detector_watermark")
+    if not isinstance(detector_value, dict):
+        detector_value = semantic.get("watermark")
     return _ParsedArtifact(
         claims=_claims(
             semantic,
@@ -379,6 +383,9 @@ def _base(
             task=task,
         ),
         evaluation_model=evaluation_model,
+        detector_scheme=(
+            _scheme(detector_value) if detector_scheme else None
+        ),
         inherited_model_claim=(
             _model(semantic.get("model")) if inherited_model else None
         ),
@@ -677,6 +684,7 @@ def _parse_detection(
         summary,
         producer=False,
         inherited_model=True,
+        detector_scheme=True,
         evaluation_model_field="model",
         facts=tuple(facts),
     )

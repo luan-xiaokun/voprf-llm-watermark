@@ -13,7 +13,7 @@ from ..models import ArtifactIdentity, ArtifactRef, JsonObject
 from ..workspace import ExperimentWorkspace
 
 
-ARTIFACT_INTERPRETATION_REVISION = "artifact-interpretation-v2"
+ARTIFACT_INTERPRETATION_REVISION = "artifact-interpretation-v3"
 
 
 class MetricScope(StrEnum):
@@ -104,6 +104,9 @@ class ScientificDimensions:
     scheme: str | None = None
     scheme_identity: str | None = None
     watermark_parameters: JsonObject | None = None
+    detector_scheme: str | None = None
+    detector_scheme_identity: str | None = None
+    detector_watermark_parameters: JsonObject | None = None
     population_identity: str | None = None
     generation_model: JsonObject | None = None
     generation: JsonObject | None = None
@@ -134,6 +137,11 @@ class ScientificDimensions:
             "scheme_identity": self.scheme_identity,
             "watermark_parameters": dict(
                 self.watermark_parameters or {}
+            ),
+            "detector_scheme": self.detector_scheme,
+            "detector_scheme_identity": self.detector_scheme_identity,
+            "detector_watermark_parameters": dict(
+                self.detector_watermark_parameters or {}
             ),
             "population_identity": self.population_identity,
             "generation_model": self.generation_model,
@@ -261,6 +269,7 @@ class _RawMetricFact:
 class _ParsedArtifact:
     claims: Mapping[str, object]
     evaluation_model: JsonObject | None
+    detector_scheme: JsonObject | None
     inherited_model_claim: JsonObject | None
     raw_facts: tuple[_RawMetricFact, ...]
     summary_sample_num: int | None
@@ -548,6 +557,7 @@ def _effective_dimensions(
                     )
                 )
     scheme = effective["scheme"]
+    detector_scheme = parsed[identity].detector_scheme
     return ScientificDimensions(
         scheme=(
             str(scheme["method"]) if isinstance(scheme, dict) else None
@@ -558,6 +568,21 @@ def _effective_dimensions(
         watermark_parameters=(
             dict(scheme.get("parameters", {}))
             if isinstance(scheme, dict)
+            else {}
+        ),
+        detector_scheme=(
+            str(detector_scheme["method"])
+            if isinstance(detector_scheme, dict)
+            else None
+        ),
+        detector_scheme_identity=(
+            str(detector_scheme["identity"])
+            if isinstance(detector_scheme, dict)
+            else None
+        ),
+        detector_watermark_parameters=(
+            dict(detector_scheme.get("parameters", {}))
+            if isinstance(detector_scheme, dict)
             else {}
         ),
         population_identity=(
@@ -595,6 +620,8 @@ def _missing_dimension_roles(
     kind = str(ref.manifest.get("kind"))
     if kind == "robustness":
         required.add("transformation")
+    if kind == "detection":
+        required.add("detector_scheme")
     if kind in {"perplexity", "text-evaluation", "downstream"}:
         required.add("evaluation_model")
     if kind == "downstream":
@@ -604,6 +631,7 @@ def _missing_dimension_roles(
         "generation": dimensions.generation,
         "generation_model": dimensions.generation_model,
         "scheme": dimensions.scheme,
+        "detector_scheme": dimensions.detector_scheme,
         "transformation": dimensions.transformation,
         "evaluation_model": dimensions.evaluation_model,
         "task": dimensions.task,

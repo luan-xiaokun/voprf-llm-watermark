@@ -13,6 +13,7 @@ from watermark_suite.experiments.stages import default_stage_adapters
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 PLAN_DIRECTORY = REPOSITORY / "experiments" / "plans"
+USENIX_PLAN_DIRECTORY = REPOSITORY / "experiments" / "usenix-plans"
 
 
 def _resolve_checkpoint(
@@ -83,7 +84,7 @@ def _resolve_prompt_population(
     )
 
 
-def resolve(name: str, monkeypatch):
+def resolve_path(path: Path, monkeypatch):
     import watermark_suite.experiments.stages.common as common
 
     monkeypatch.setattr(common, "_resolve_checkpoint", _resolve_checkpoint)
@@ -91,10 +92,100 @@ def resolve(name: str, monkeypatch):
         DATASET_PROMPTS, "resolve", _resolve_prompt_population
     )
     return resolve_plan(
-        PLAN_DIRECTORY / name,
+        path,
         repository=REPOSITORY,
         adapters=default_stage_adapters(),
     )
+
+
+def resolve(name: str, monkeypatch):
+    return resolve_path(PLAN_DIRECTORY / name, monkeypatch)
+
+
+def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
+    plan = resolve_path(
+        USENIX_PLAN_DIRECTORY / "robustness-qwen25-3b-instruct.yaml",
+        monkeypatch,
+    )
+
+    generations = [
+        stage for stage in plan.stages if stage.kind == "generation"
+    ]
+    assert len(generations) == 9
+    assert all(
+        stage.semantic_settings["prompt_population"]["dataset"][
+            "selection"
+        ]["count"]
+        == 500
+        for stage in generations
+    )
+    assert sum(
+        stage.semantic_settings["watermark"]["method"] == "none"
+        for stage in generations
+    ) == 1
+    assert sum(stage.kind == "robustness" for stage in plan.stages) == 23
+    assert sum(stage.kind == "detection" for stage in plan.stages) == 31
+    assert sum(stage.kind == "text-evaluation" for stage in plan.stages) == 23
+    assert len(plan.stages) == 87
+
+    negative_detections = [
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "detect_unwatermarked"
+    ]
+    assert len(negative_detections) == 8
+    assert {
+        stage.semantic_settings["detector_watermark"]["method"]
+        for stage in negative_detections
+    } == {
+        "vow",
+        "lefthash",
+        "selfhash",
+        "rdf",
+        "pdw",
+        "upv",
+    }
+    detections = [
+        stage for stage in plan.stages if stage.kind == "detection"
+    ]
+    assert all(
+        stage.semantic_settings["step_size"] is None
+        for stage in detections
+    )
+    assert all(
+        stage.semantic_settings["significance_levels"] == [0.01]
+        for stage in detections
+    )
+
+    evaluations = [
+        stage for stage in plan.stages if stage.kind == "text-evaluation"
+    ]
+    assert all(
+        stage.semantic_settings["embedding_provider"] == "openai"
+        and stage.semantic_settings["embedding_model"]["checkpoint"]
+        == "text-embedding-3-large"
+        for stage in evaluations
+    )
+    pdw_attacks = [
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "transform_pdw_robustness"
+    ]
+    assert len(pdw_attacks) == 2
+    assert {
+        stage.semantic_settings["transformation"].get("model")
+        for stage in pdw_attacks
+        if stage.semantic_settings["transformation"]["method"]
+        == "openai-paraphrase"
+    } == {"gpt-3.5-turbo-0125"}
+
+    report = next(
+        stage
+        for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 54
+    assert report.semantic_settings["threshold_policy"] == {"default": 0.01}
 
 
 def test_tpr_token_length_plan_contract(monkeypatch):

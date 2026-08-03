@@ -23,6 +23,7 @@ from watermark_suite.experiments.openai_paraphrase import (
 from watermark_suite.experiments.stages.robustness import (
     RobustnessStageAdapter,
 )
+from watermark_suite.experiments.stages.detection import DetectionStageAdapter
 from watermark_suite.experiments.stages.text_evaluation import (
     TextEvaluationStageAdapter,
 )
@@ -66,6 +67,8 @@ def resolution_context(tmp_path: Path) -> ResolutionContext:
 def source_artifact(
     tmp_path: Path,
     records: list[dict],
+    *,
+    watermark: dict = WATERMARK,
 ) -> ArtifactRef:
     path = tmp_path / "artifact"
     path.mkdir()
@@ -83,10 +86,48 @@ def source_artifact(
         manifest={
             "semantic_settings": {
                 "model": MODEL,
-                "watermark": WATERMARK,
+                "watermark": watermark,
             }
         },
     )
+
+
+def test_detection_can_score_one_unwatermarked_artifact_with_an_override(
+    tmp_path,
+):
+    source = source_artifact(
+        tmp_path,
+        [{"sample_id": "sample:1", "generated_text": "plain text"}],
+        watermark={"method": "none", "enabled": False},
+    )
+    detector = {
+        "method": "lefthash",
+        "enabled": True,
+        "gamma": 0.25,
+        "delta": 2.0,
+    }
+    adapter = DetectionStageAdapter()
+    definition = adapter.resolve(
+        {
+            "batch_size": 8,
+            "target_field": "generated_text",
+            "token_num": None,
+            "significance_levels": [0.01],
+            "use_local": True,
+            "step_size": None,
+            "detector_watermark": detector,
+            "device": "cpu",
+        },
+        resolution_context(tmp_path),
+    )
+
+    bound = adapter.bind_inputs(definition, (source,))
+
+    assert bound.semantic_settings["watermark"] == {
+        "method": "none",
+        "enabled": False,
+    }
+    assert bound.semantic_settings["detector_watermark"] == detector
 
 
 def execution_context(
@@ -479,3 +520,67 @@ def test_text_evaluation_emits_sample_similarity_and_diversity_summary(
     assert summary["similarity"]["count"] == 2
     assert summary["diversity"]["group_num"] == 1
     assert summary["diversity"]["groups"][0]["group"] == "prompt:1"
+
+
+def test_text_evaluation_supports_openai_embedding_models(
+    tmp_path,
+    monkeypatch,
+):
+    import watermark_suite.experiments.stages.text_evaluation as module
+
+    class FakeOpenAIEmbedder:
+        def embed_many(self, texts, *, model, dimensions):
+            assert model == "text-embedding-3-large"
+            assert dimensions is None
+            return [
+                [
+                    float(text.lower().count("cat")),
+                    float(text.lower().count("dog")),
+                ]
+                for text in texts
+            ]
+
+    monkeypatch.setattr(module, "OpenAIEmbedder", FakeOpenAIEmbedder)
+    source = source_artifact(
+        tmp_path,
+        [
+            {
+                "sample_id": "sample:1",
+                "original_text": "cat cat",
+                "transformed_text": "cat dog",
+            }
+        ],
+    )
+    adapter = TextEvaluationStageAdapter()
+    definition = adapter.resolve(
+        {
+            "metric_set": ["similarity"],
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-large",
+            "embedding_dimensions": None,
+            "batch_size": 128,
+            "reference_field": "original_text",
+            "target_field": "transformed_text",
+            "group_field": None,
+            "device": "cuda",
+        },
+        resolution_context(tmp_path),
+    )
+    bound = adapter.bind_inputs(definition, (source,))
+    execution = adapter.prepare(
+        execution_context(
+            tmp_path,
+            definition=bound,
+            source=source,
+            runtime=object(),
+        )
+    )
+
+    result = execution.execute(execution.work_items()[0])
+
+    assert definition.semantic_settings["embedding_model"] == {
+        "provider": "openai",
+        "checkpoint": "text-embedding-3-large",
+        "revision": "api",
+    }
+    assert 0 < result.records[0]["text_evaluation"]["cosine_similarity"] < 1

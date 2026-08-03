@@ -168,7 +168,7 @@ def adaptive_forgery_curve(
 
 class DetectionStageAdapter:
     kind = "detection"
-    revision = "detection-v4"
+    revision = "detection-v5"
     accepted_settings = {
         "batch_size",
         "target_field",
@@ -176,14 +176,14 @@ class DetectionStageAdapter:
         "significance_levels",
         "use_local",
         "step_size",
+        "detector_watermark",
         "device",
     }
-    _required = accepted_settings
+    _required = accepted_settings - {"detector_watermark"}
 
     def resolve(
         self, settings: JsonObject, context: ResolutionContext
     ) -> ResolvedStageDefinition:
-        del context
         require(settings, self._required, kind=self.kind)
         if settings["batch_size"] <= 0:
             raise PlanValidationError("batch_size must be positive")
@@ -196,6 +196,19 @@ class DetectionStageAdapter:
             raise PlanValidationError(
                 "significance_levels must be a non-empty list between 0 and 1"
             )
+        detector_watermark = settings.get("detector_watermark")
+        if detector_watermark is not None:
+            detector_watermark = WATERMARK_SCHEMES.resolve(
+                detector_watermark,
+                context.repository,
+            )
+            if (
+                detector_watermark["method"] == "none"
+                or not detector_watermark["enabled"]
+            ):
+                raise PlanValidationError(
+                    "detector_watermark must identify an enabled detector"
+                )
         semantic = {
             key: settings[key]
             for key in (
@@ -207,8 +220,12 @@ class DetectionStageAdapter:
                 "step_size",
             )
         }
+        semantic["detector_watermark"] = detector_watermark
         return ResolvedStageDefinition(
-            settings=dict(settings),
+            settings={
+                **settings,
+                "detector_watermark": detector_watermark,
+            },
             semantic_settings=semantic,
             execution_settings={"device": settings["device"]},
             artifact_schema_revision="watermark-detection-v4",
@@ -226,20 +243,29 @@ class DetectionStageAdapter:
             )
         source = inputs[0]
         source_semantic = source.manifest.get("semantic_settings", {})
-        watermark = source_semantic.get("watermark")
+        source_watermark = source_semantic.get("watermark")
         model = source_semantic.get("model")
-        if not isinstance(watermark, dict) or not isinstance(model, dict):
+        if (
+            not isinstance(source_watermark, dict)
+            or not isinstance(model, dict)
+        ):
             raise PlanValidationError(
                 "source Artifact does not declare watermark/model provenance"
             )
-        if watermark.get("method") == "none":
+        detector_watermark = definition.semantic_settings.get(
+            "detector_watermark"
+        )
+        if detector_watermark is None:
+            detector_watermark = source_watermark
+        if detector_watermark.get("method") == "none":
             raise PlanValidationError(
                 "detection cannot derive a detector from an unwatermarked "
-                "source Artifact"
+                "source Artifact without detector_watermark"
             )
         semantic = {
             **definition.semantic_settings,
-            "watermark": watermark,
+            "watermark": source_watermark,
+            "detector_watermark": detector_watermark,
             "tokenizer": {
                 key: model[key]
                 for key in (
@@ -250,7 +276,7 @@ class DetectionStageAdapter:
                 )
             },
         }
-        if watermark.get("method") == "upv":
+        if detector_watermark.get("method") == "upv":
             # UPV exposes a classifier decision rather than p-values. The
             # fixed, calibrated operating point is carried by its detector
             # material, so generic p-value thresholds are not semantic inputs
@@ -259,7 +285,8 @@ class DetectionStageAdapter:
         return ResolvedStageDefinition(
             settings={
                 **definition.settings,
-                "derived_watermark": watermark,
+                "derived_watermark": source_watermark,
+                "derived_detector_watermark": detector_watermark,
                 "derived_tokenizer": semantic["tokenizer"],
             },
             semantic_settings=semantic,
@@ -300,7 +327,7 @@ class _DetectionExecution:
             tokenizer_model, padding_side="left"
         )
         self.detector, self.detector_kwargs = WATERMARK_SCHEMES.detector(
-            context.semantic_settings["watermark"],
+            context.semantic_settings["detector_watermark"],
             self.tokenizer,
             device=context.execution_settings["device"],
         )
@@ -331,12 +358,13 @@ class _DetectionExecution:
 
     def _detect(self, texts: list[str]) -> tuple[list[Any], list[Any] | None]:
         semantic = self.context.semantic_settings
+        detector_watermark = semantic["detector_watermark"]
         kwargs = {
             "token_num": semantic["token_num"],
         }
         signature_target = self.detector.batch_detect
         if (
-            semantic["watermark"]["method"] == "vow"
+            detector_watermark["method"] == "vow"
             and semantic["use_local"]
         ):
             signature_target = self.detector.local_batch_detect
@@ -348,7 +376,7 @@ class _DetectionExecution:
                 semantic["step_size"] is not None
             )
         if (
-            semantic["watermark"]["method"] == "vow"
+            detector_watermark["method"] == "vow"
             and not semantic["use_local"]
         ):
             server = self.detector.voprf_server
@@ -416,6 +444,9 @@ class _DetectionExecution:
     def summarize(self, records: list[JsonObject]) -> JsonObject:
         levels = self.context.semantic_settings["significance_levels"]
         watermark = self.context.semantic_settings["watermark"]
+        detector_watermark = self.context.semantic_settings.get(
+            "detector_watermark", watermark
+        )
         total_tokens = sum(
             int(record["detection"]["total_token_num"])
             for record in records
@@ -428,13 +459,16 @@ class _DetectionExecution:
         summary: JsonObject = {
             "sample_num": len(records),
             "watermark": watermark,
+            "detector_watermark": detector_watermark,
             "total_token_num": total_tokens,
             "mean_token_num": (
                 total_tokens / len(records) if records else 0.0
             ),
         }
-        if watermark["method"] == "upv":
-            operating_point = watermark.get("detection_operating_point")
+        if detector_watermark["method"] == "upv":
+            operating_point = detector_watermark.get(
+                "detection_operating_point"
+            )
             if not isinstance(operating_point, dict):
                 raise PlanValidationError(
                     "UPV detection requires a resolved operating point"

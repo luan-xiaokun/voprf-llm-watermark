@@ -4,8 +4,6 @@ name: robustness-qwen25-3b-instruct
 models:
   qwen-instruct:
     checkpoint: Qwen/Qwen2.5-3B-Instruct
-  similarity-encoder:
-    checkpoint: sentence-transformers/all-mpnet-base-v2
   synonym-replacer:
     checkpoint: distilbert/distilbert-base-uncased
 
@@ -24,11 +22,12 @@ defaults:
   repetitions: 1
 
 stages:
+  # Six schemes share the same 500-prompt population and decoding policy.
   generate_robustness:
     kind: generation
     model: qwen-instruct
     dataset: eli5-robustness
-    num_samples: 1000
+    num_samples: 500
     batch_size: 32
     seed: 42
     max_new_tokens: 600
@@ -40,36 +39,42 @@ stages:
     stop_strings: null
     sweep:
       watermark:
-        - method: vow
+        - &vow_h1
+          method: vow
           enabled: true
           window_size: 1
           gamma: 0.5
           delta: 2.5
           server_seed_path: data/server_seed
           naive_baseline: false
-        - method: vow
+        - &vow_h2
+          method: vow
           enabled: true
           window_size: 2
           gamma: 0.5
           delta: 2.5
           server_seed_path: data/server_seed
           naive_baseline: false
-        - method: vow
+        - &vow_h4
+          method: vow
           enabled: true
           window_size: 4
           gamma: 0.5
           delta: 2.5
           server_seed_path: data/server_seed
           naive_baseline: false
-        - method: lefthash
+        - &lefthash
+          method: lefthash
           enabled: true
           gamma: 0.25
           delta: 2.0
-        - method: selfhash
+        - &selfhash
+          method: selfhash
           enabled: true
           gamma: 0.25
           delta: 2.0
-        - method: upv
+        - &upv
+          method: upv
           enabled: true
           detector_dir: experiments/upv_baseline/model
           calibration_path: experiments/upv_baseline/private_detector_calibration.json
@@ -80,73 +85,11 @@ stages:
           layers: 5
           beam_size: 0
 
-  detect_clean_robustness:
-    kind: detection
-    input: generate_robustness
-    batch_size: 64
-    target_field: generated_text
-    token_num: null
-    significance_levels: [0.00001, 0.01]
-    use_local: true
-    step_size: 20
-
-  transform_robustness:
-    kind: robustness
-    input: generate_robustness
-    batch_size: 16
-    target_field: generated_text
-    seed: 42
-    sweep:
-      transformation:
-        - method: masked-lm-replacement
-          model: synonym-replacer
-          replacement_rate: 0.3
-          top_k: 15
-          candidate_sampling: score-weighted
-        - method: openai-paraphrase
-          model: gpt-3.5-turbo-0125
-          max_output_tokens: 600
-          temperature: 0.7
-          reasoning_effort: null
-          instruction: >-
-            Rewrite the supplied text in different wording while preserving
-            its information and approximate length. Return only the rewritten
-            text.
-        - method: openai-paraphrase
-          model: gpt-5.6-luna
-          max_output_tokens: 600
-          temperature: 0.7
-          reasoning_effort: low
-          instruction: >-
-            Rewrite the supplied text in different wording while preserving
-            its information and approximate length. Return only the rewritten
-            text.
-
-  detect_robustness:
-    kind: detection
-    input: transform_robustness
-    batch_size: 64
-    target_field: transformed_text
-    token_num: null
-    significance_levels: [0.00001, 0.01]
-    use_local: true
-    step_size: 20
-
-  evaluate_robustness_similarity:
-    kind: text-evaluation
-    input: transform_robustness
-    metric_set: [similarity]
-    embedding_model: similarity-encoder
-    batch_size: 128
-    reference_field: original_text
-    target_field: transformed_text
-    group_field: null
-
   generate_rdf_robustness:
     kind: generation
     model: qwen-instruct
     dataset: eli5-robustness
-    num_samples: 1000
+    num_samples: 500
     batch_size: 16
     seed: 42
     max_new_tokens: 600
@@ -156,7 +99,7 @@ stages:
     temperature: 0.7
     suppress_eos: false
     stop_strings: null
-    watermark:
+    watermark: &rdf
       method: rdf
       enabled: true
       length: 256
@@ -164,30 +107,67 @@ stages:
       watermark_device: cpu
       n_runs: 100
 
-  detect_clean_rdf_robustness:
-    kind: detection
-    input: generate_rdf_robustness
-    batch_size: 16
-    target_field: generated_text
-    token_num: null
-    significance_levels: [0.01]
-    use_local: true
-    step_size: 50
-
-  transform_rdf_robustness:
-    kind: robustness
-    input: generate_rdf_robustness
+  generate_pdw_robustness:
+    kind: generation
+    model: qwen-instruct
+    dataset: eli5-robustness
+    num_samples: 500
     batch_size: 8
+    seed: 42
+    max_new_tokens: 600
+    do_sample: true
+    top_p: null
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark: &pdw
+      method: pdw
+      enabled: true
+      sk_path: data/pdw/sk
+      pk_path: data/pdw/pk
+      params_path: data/pdw/params
+      signature_segment_length: 16
+      bit_size: 2
+      message_length: 8
+      max_planted_errors: 2
+      seed: 0
+
+  # This single 500-sample control Artifact is scored by all eight detectors.
+  generate_unwatermarked:
+    kind: generation
+    model: qwen-instruct
+    dataset: eli5-robustness
+    num_samples: 500
+    batch_size: 32
+    seed: 42
+    max_new_tokens: 600
+    do_sample: true
+    top_p: null
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: none
+      enabled: false
+
+  transform_robustness:
+    kind: robustness
+    input: generate_robustness
+    batch_size: 16
     target_field: generated_text
     seed: 42
     sweep:
       transformation:
-        - method: masked-lm-replacement
+        - &synonym_attack
+          method: masked-lm-replacement
           model: synonym-replacer
           replacement_rate: 0.3
           top_k: 15
           candidate_sampling: score-weighted
-        - method: openai-paraphrase
+        - &gpt35_attack
+          method: openai-paraphrase
           model: gpt-3.5-turbo-0125
           max_output_tokens: 600
           temperature: 0.7
@@ -196,7 +176,8 @@ stages:
             Rewrite the supplied text in different wording while preserving
             its information and approximate length. Return only the rewritten
             text.
-        - method: openai-paraphrase
+        - &luna_attack
+          method: openai-paraphrase
           model: gpt-5.6-luna
           max_output_tokens: 600
           temperature: 0.7
@@ -206,6 +187,40 @@ stages:
             its information and approximate length. Return only the rewritten
             text.
 
+  transform_rdf_robustness:
+    kind: robustness
+    input: generate_rdf_robustness
+    batch_size: 8
+    target_field: generated_text
+    seed: 42
+    sweep:
+      transformation:
+        - *synonym_attack
+        - *gpt35_attack
+        - *luna_attack
+
+  # The manuscript deliberately leaves PDW + Luna unmeasured (---).
+  transform_pdw_robustness:
+    kind: robustness
+    input: generate_pdw_robustness
+    batch_size: 8
+    target_field: generated_text
+    seed: 42
+    sweep:
+      transformation:
+        - *synonym_attack
+        - *gpt35_attack
+
+  detect_robustness:
+    kind: detection
+    input: transform_robustness
+    batch_size: 32
+    target_field: transformed_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: null
+
   detect_rdf_robustness:
     kind: detection
     input: transform_rdf_robustness
@@ -214,13 +229,70 @@ stages:
     token_num: null
     significance_levels: [0.01]
     use_local: true
-    step_size: 50
+    step_size: null
+
+  detect_pdw_robustness:
+    kind: detection
+    input: transform_pdw_robustness
+    batch_size: 16
+    target_field: transformed_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: null
+
+  # Detector overrides let every scheme score the same negative texts.
+  detect_unwatermarked:
+    kind: detection
+    input: generate_unwatermarked
+    batch_size: 32
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: null
+    sweep:
+      detector_watermark:
+        - *vow_h1
+        - *vow_h2
+        - *vow_h4
+        - *lefthash
+        - *selfhash
+        - *rdf
+        - *pdw
+        - *upv
+
+  evaluate_robustness_similarity:
+    kind: text-evaluation
+    input: transform_robustness
+    metric_set: [similarity]
+    embedding_provider: openai
+    embedding_model: text-embedding-3-large
+    embedding_dimensions: null
+    batch_size: 128
+    reference_field: original_text
+    target_field: transformed_text
+    group_field: null
 
   evaluate_rdf_robustness_similarity:
     kind: text-evaluation
     input: transform_rdf_robustness
     metric_set: [similarity]
-    embedding_model: similarity-encoder
+    embedding_provider: openai
+    embedding_model: text-embedding-3-large
+    embedding_dimensions: null
+    batch_size: 128
+    reference_field: original_text
+    target_field: transformed_text
+    group_field: null
+
+  evaluate_pdw_robustness_similarity:
+    kind: text-evaluation
+    input: transform_pdw_robustness
+    metric_set: [similarity]
+    embedding_provider: openai
+    embedding_model: text-embedding-3-large
+    embedding_dimensions: null
     batch_size: 128
     reference_field: original_text
     target_field: transformed_text
@@ -229,14 +301,14 @@ stages:
   assemble_robustness:
     kind: result-aggregation
     inputs:
-      - detect_clean_robustness
       - detect_robustness
-      - evaluate_robustness_similarity
-      - detect_clean_rdf_robustness
       - detect_rdf_robustness
+      - detect_pdw_robustness
+      - detect_unwatermarked
+      - evaluate_robustness_similarity
       - evaluate_rdf_robustness_similarity
+      - evaluate_pdw_robustness_similarity
     recipe: robustness
     confidence_level: 0.95
     threshold_policy:
-      default: 0.00001
-      rdf: 0.01
+      default: 0.01

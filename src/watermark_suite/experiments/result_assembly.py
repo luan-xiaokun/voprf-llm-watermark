@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import replace
 from statistics import NormalDist
 from typing import Callable
 
 from .artifact_interpretation import (
     ARTIFACT_INTERPRETATION_REVISION,
     ArtifactInterpretation,
+    ExactCount,
     InterpretationSet,
     MetricFact,
+    MetricScope,
 )
 from .errors import PlanValidationError
 from .identity import identity_for
@@ -74,7 +77,10 @@ class ResultAssembler:
         self.threshold_policy = threshold_policy
 
     def _threshold(self, artifact: ArtifactInterpretation) -> float:
-        method = artifact.dimensions.scheme
+        method = (
+            artifact.dimensions.detector_scheme
+            or artifact.dimensions.scheme
+        )
         value = self.threshold_policy.get(
             method, self.threshold_policy.get("default")
         )
@@ -87,6 +93,36 @@ class ResultAssembler:
                 f"threshold_policy has no valid threshold for scheme {method!r}"
             )
         return float(value)
+
+    @staticmethod
+    def _roc_auc(
+        positive_scores: list[float],
+        negative_scores: list[float],
+    ) -> float:
+        if not positive_scores or not negative_scores:
+            raise PlanValidationError(
+                "AUC requires non-empty positive and negative samples"
+            )
+        ranked = sorted(
+            [(value, True) for value in positive_scores]
+            + [(value, False) for value in negative_scores]
+        )
+        rank_sum = 0.0
+        index = 0
+        while index < len(ranked):
+            end = index + 1
+            while end < len(ranked) and ranked[end][0] == ranked[index][0]:
+                end += 1
+            average_rank = (index + 1 + end) / 2.0
+            rank_sum += average_rank * sum(
+                is_positive for _, is_positive in ranked[index:end]
+            )
+            index = end
+        positive_num = len(positive_scores)
+        negative_num = len(negative_scores)
+        return (
+            rank_sum - positive_num * (positive_num + 1) / 2.0
+        ) / (positive_num * negative_num)
 
     @staticmethod
     def _facts(
@@ -477,10 +513,50 @@ class ResultAssembler:
                 )
             evaluations_by_source[source] = artifact
 
+        detections = tuple(
+            artifact for artifact in artifacts if artifact.kind == "detection"
+        )
+        negative_detections: dict[str, ArtifactInterpretation] = {}
+        for artifact in detections:
+            detector_identity = artifact.dimensions.detector_scheme_identity
+            if detector_identity is None:
+                raise PlanValidationError(
+                    f"Detection Artifact {artifact.identity.value} lacks a "
+                    "detector scheme"
+                )
+            if artifact.dimensions.scheme != "none":
+                continue
+            if detector_identity in negative_detections:
+                raise PlanValidationError(
+                    f"Detector {detector_identity} has more than one "
+                    "unwatermarked reference Artifact"
+                )
+            negative_detections[detector_identity] = artifact
+        auc_enabled = bool(negative_detections)
+
         rows = []
         transformed_detections: dict[str, ArtifactInterpretation] = {}
-        for artifact in artifacts:
-            if artifact.kind != "detection":
+        for artifact in detections:
+            detector_identity = artifact.dimensions.detector_scheme_identity
+            facts = self._detection_facts(
+                artifact,
+                token_axis=not auc_enabled,
+            )
+            if not facts:
+                raise PlanValidationError(
+                    f"Artifact {artifact.identity.value} has no selected "
+                    "detection fact at its selected operating point"
+                )
+            if artifact.dimensions.scheme == "none":
+                rows.extend(
+                    self._row(
+                        recipe=recipe,
+                        metric="false_positive_rate",
+                        fact=fact,
+                        sources=(artifact,),
+                    )
+                    for fact in facts
+                )
                 continue
             if artifact.dimensions.transformation is not None:
                 sources = artifact.direct_source_identities
@@ -496,16 +572,56 @@ class ResultAssembler:
                         "detection evaluation"
                     )
                 transformed_detections[source] = artifact
-            facts = self._detection_facts(artifact, token_axis=True)
-            if not facts:
+                if auc_enabled:
+                    negative = negative_detections.get(detector_identity)
+                    if negative is None:
+                        raise PlanValidationError(
+                            f"Detector {detector_identity} has no "
+                            "unwatermarked reference Artifact"
+                        )
+                    positive_scores = self._robustness_scores(artifact)
+                    negative_scores = self._robustness_scores(negative)
+                    auc_fact = MetricFact(
+                        metric="roc_auc",
+                        scope=MetricScope.AGGREGATE,
+                        value=self._roc_auc(
+                            positive_scores,
+                            negative_scores,
+                        ),
+                        dimensions=replace(
+                            artifact.dimensions,
+                            token_num=None,
+                            target_fpr=None,
+                            detection_operating_point=None,
+                        ),
+                        source_artifact=artifact.identity,
+                        count=ExactCount(
+                            len(positive_scores) + len(negative_scores)
+                        ),
+                    )
+                    rows.append(
+                        self._row(
+                            recipe=recipe,
+                            metric="roc_auc",
+                            fact=auc_fact,
+                            sources=(artifact, negative),
+                        )
+                    )
+            if artifact.dimensions.detector_scheme_identity != (
+                artifact.dimensions.scheme_identity
+            ):
                 raise PlanValidationError(
-                    f"Artifact {artifact.identity.value} has no token-level "
-                    "detection facts at its selected operating point"
+                    f"Positive Artifact {artifact.identity.value} was scored "
+                    "with a detector for another watermark scheme"
                 )
             rows.extend(
                 self._row(
                     recipe=recipe,
-                    metric="detection_rate",
+                    metric=(
+                        "true_positive_rate"
+                        if auc_enabled
+                        else "detection_rate"
+                    ),
                     fact=fact,
                     sources=(artifact,),
                 )
@@ -536,6 +652,28 @@ class ResultAssembler:
                 )
             )
         return rows
+
+    def _robustness_scores(
+        self,
+        artifact: ArtifactInterpretation,
+    ) -> list[float]:
+        confidence = artifact.dimensions.detector_scheme == "upv"
+        metric = "classifier_confidence" if confidence else "p_value"
+        facts = self.interpretations.stream_sample_facts(
+            artifact.identity,
+            metrics=(metric,),
+        )
+        values = [
+            float(fact.value)
+            for fact in facts
+            if fact.metric == metric and fact.value is not None
+        ]
+        if len(values) != artifact.record_count:
+            raise PlanValidationError(
+                f"Artifact {artifact.identity.value} provides {len(values)} "
+                f"{metric} scores for {artifact.record_count} records"
+            )
+        return values if confidence else [-value for value in values]
 
     def _adaptive_forgery(
         self,

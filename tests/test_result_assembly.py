@@ -183,19 +183,54 @@ def detection(
     source: ArtifactRef,
     *,
     watermark: dict = VOW,
+    detector_watermark: dict | None = None,
     positive: int = 1,
-    token_num: int = 100,
+    token_num: int | None = 100,
 ) -> ArtifactRef:
+    detector_watermark = detector_watermark or watermark
+    p_values = [
+        0.000001 if index < positive else 0.5
+        for index in range(2)
+    ]
+    milestones = []
+    if token_num is not None:
+        milestones.append(
+            {
+                "token_num": token_num,
+                "eligible_sample_num": 2,
+                "detection_counts": {
+                    "1e-05": {
+                        "positive_num": positive,
+                        "sample_num": 2,
+                    },
+                    "1e-02": {
+                        "positive_num": positive,
+                        "sample_num": 2,
+                    },
+                },
+            }
+        )
     return artifact(
         root,
         name,
         kind="detection",
         schema="watermark-detection-v4",
-        semantic={"watermark": watermark},
+        semantic={
+            "watermark": watermark,
+            "detector_watermark": detector_watermark,
+        },
         sources=(source,),
+        records=[
+            {
+                "sample_id": f"{name}:{index}",
+                "detection": {"p_value": p_value},
+            }
+            for index, p_value in enumerate(p_values)
+        ],
         summary={
             "sample_num": 2,
             "watermark": watermark,
+            "detector_watermark": detector_watermark,
             "detection_operating_points": {
                 "1e-05": {
                     "kind": "p-value-threshold",
@@ -216,22 +251,14 @@ def detection(
                 "1e-05": {"positive_num": positive, "sample_num": 2},
                 "1e-02": {"positive_num": positive, "sample_num": 2},
             },
-            "milestone_detection_rate": [
-                {
-                    "token_num": token_num,
-                    "eligible_sample_num": 2,
-                    "detection_counts": {
-                        "1e-05": {
-                            "positive_num": positive,
-                            "sample_num": 2,
-                        },
-                        "1e-02": {
-                            "positive_num": positive,
-                            "sample_num": 2,
-                        },
-                    },
-                }
-            ],
+            "p_value_distribution": {
+                "count": 2,
+                "mean": sum(p_values) / 2,
+                "median": sum(p_values) / 2,
+                "min": min(p_values),
+                "max": max(p_values),
+            },
+            "milestone_detection_rate": milestones,
         },
     )
 
@@ -751,7 +778,7 @@ def test_robustness_report_joins_transformation_detection_and_similarity(
     tmp_path,
 ):
     generated = generation(tmp_path, "generated", VOW)
-    clean = detection(tmp_path, "clean", generated, token_num=50)
+    unwatermarked = generation(tmp_path, "unwatermarked", NONE)
     transformed = artifact(
         tmp_path,
         "transformed",
@@ -766,7 +793,16 @@ def test_robustness_report_joins_transformation_detection_and_similarity(
         summary={"sample_num": 2},
     )
     robust_detection = detection(
-        tmp_path, "robust_detection", transformed, token_num=50
+        tmp_path, "robust_detection", transformed, token_num=None
+    )
+    negative_detection = detection(
+        tmp_path,
+        "negative_detection",
+        unwatermarked,
+        watermark=NONE,
+        detector_watermark=VOW,
+        positive=0,
+        token_num=None,
     )
     similarity = artifact(
         tmp_path,
@@ -792,27 +828,33 @@ def test_robustness_report_joins_transformation_detection_and_similarity(
     )
     all_artifacts = (
         generated,
-        clean,
+        unwatermarked,
         transformed,
         robust_detection,
+        negative_detection,
         similarity,
     )
 
     rows, _ = assemble_stage(
         tmp_path,
         all_artifacts,
-        (clean, robust_detection, similarity),
+        (robust_detection, negative_detection, similarity),
         recipe="robustness",
     )
 
     assert sorted(row["metric"] for row in rows) == [
         "cosine_similarity",
-        "detection_rate",
-        "detection_rate",
+        "false_positive_rate",
+        "roc_auc",
+        "true_positive_rate",
     ]
     assert sum(
         row["dimensions"]["transformation"] is None for row in rows
     ) == 1
+    assert any(
+        row["metric"] == "roc_auc" and row["value"] == 0.75
+        for row in rows
+    )
     assert any(
         row["metric"] == "cosine_similarity" and row["value"] == 0.8
         for row in rows

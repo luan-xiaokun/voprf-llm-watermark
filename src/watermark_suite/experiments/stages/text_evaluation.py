@@ -16,6 +16,7 @@ from ..adapters import (
 from ..errors import PlanValidationError
 from ..identity import identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
+from ..openai_embedding import OpenAIEmbedder
 from .common import artifact_records, batches, require, resolve_model
 
 
@@ -104,17 +105,22 @@ def _vendi_score(embeddings: np.ndarray) -> float:
 
 class TextEvaluationStageAdapter:
     kind = "text-evaluation"
-    revision = "text-evaluation-v1"
+    revision = "text-evaluation-v2"
     accepted_settings = {
         "metric_set",
+        "embedding_provider",
         "embedding_model",
+        "embedding_dimensions",
         "batch_size",
         "reference_field",
         "target_field",
         "group_field",
         "device",
     }
-    _required = accepted_settings
+    _required = accepted_settings - {
+        "embedding_provider",
+        "embedding_dimensions",
+    }
 
     def resolve(
         self,
@@ -161,27 +167,71 @@ class TextEvaluationStageAdapter:
             raise PlanValidationError(
                 "similarity requires a non-empty reference_field"
             )
-        model = resolve_model(
-            settings["embedding_model"],
-            models=context.models,
-            repository=context.repository,
-        )
+        provider = settings.get("embedding_provider", "local")
+        dimensions = settings.get("embedding_dimensions")
+        if provider not in {"local", "openai"}:
+            raise PlanValidationError(
+                "embedding_provider must be local or openai"
+            )
+        if dimensions is not None and (
+            not isinstance(dimensions, int)
+            or isinstance(dimensions, bool)
+            or dimensions <= 0
+        ):
+            raise PlanValidationError(
+                "embedding_dimensions must be positive or null"
+            )
+        if provider == "local":
+            if dimensions is not None:
+                raise PlanValidationError(
+                    "embedding_dimensions is only supported by openai"
+                )
+            model = resolve_model(
+                settings["embedding_model"],
+                models=context.models,
+                repository=context.repository,
+            )
+        else:
+            requested_model = settings["embedding_model"]
+            if (
+                not isinstance(requested_model, str)
+                or not requested_model.strip()
+            ):
+                raise PlanValidationError(
+                    "OpenAI embedding_model must be non-empty"
+                )
+            model = {
+                "provider": "openai",
+                "checkpoint": requested_model,
+                "revision": "api",
+            }
         semantic = {
             "metric_set": list(metrics),
+            "embedding_provider": provider,
             "embedding_model": model,
+            "embedding_dimensions": dimensions,
             "batch_size": settings["batch_size"],
             "reference_field": settings["reference_field"],
             "target_field": settings["target_field"],
             "group_field": settings["group_field"],
         }
         return ResolvedStageDefinition(
-            settings={**settings, "embedding_model": model},
+            settings={
+                **settings,
+                "embedding_provider": provider,
+                "embedding_model": model,
+                "embedding_dimensions": dimensions,
+            },
             semantic_settings=semantic,
             execution_settings={"device": settings["device"]},
             artifact_schema_revision="text-evaluation-v1",
             resource_key=(
-                f"encoder:{model['checkpoint']}@{model['revision']}:"
-                f"{settings['device']}"
+                f"remote:openai-embedding:{model['checkpoint']}"
+                if provider == "openai"
+                else (
+                    f"encoder:{model['checkpoint']}@{model['revision']}:"
+                    f"{settings['device']}"
+                )
             ),
         )
 
@@ -207,9 +257,17 @@ class _TextEvaluationExecution:
     def __init__(self, context: StageExecutionContext) -> None:
         self.context = context
         self.records = artifact_records(context.inputs[0])
-        self.encoder = context.runtime.encoder(
-            context.semantic_settings["embedding_model"],
-            device=context.execution_settings["device"],
+        provider = context.semantic_settings["embedding_provider"]
+        self.encoder = (
+            context.runtime.encoder(
+                context.semantic_settings["embedding_model"],
+                device=context.execution_settings["device"],
+            )
+            if provider == "local"
+            else None
+        )
+        self.openai_embedder = (
+            OpenAIEmbedder() if provider == "openai" else None
         )
 
     def work_items(self) -> list[WorkItem]:
@@ -235,6 +293,18 @@ class _TextEvaluationExecution:
         return result
 
     def _encode(self, texts: list[str]) -> np.ndarray:
+        if self.openai_embedder is not None:
+            model = self.context.semantic_settings["embedding_model"]
+            return np.asarray(
+                self.openai_embedder.embed_many(
+                    texts,
+                    model=model["checkpoint"],
+                    dimensions=self.context.semantic_settings[
+                        "embedding_dimensions"
+                    ],
+                ),
+                dtype=float,
+            )
         return np.asarray(
             self.encoder.encode(
                 texts,

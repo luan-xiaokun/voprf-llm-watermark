@@ -113,6 +113,28 @@ class UniformCausalModel(torch.nn.Module):
         )
 
 
+class RepeatingCausalModel(torch.nn.Module):
+    @property
+    def device(self):
+        return torch.device("cpu")
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask=None,
+        past_key_values=None,
+        use_cache=True,
+        return_dict=True,
+    ):
+        del attention_mask, use_cache, return_dict
+        logits = torch.full(
+            (input_ids.shape[0], input_ids.shape[1], 6), -100.0
+        )
+        logits[:, -1, 1] = 1.0
+        step = 0 if past_key_values is None else past_key_values
+        return SimpleNamespace(logits=logits, past_key_values=step + 1)
+
+
 class AdaptiveCandidateSelectorTests(unittest.TestCase):
     def test_first_green_fallback_and_pair_cache(self):
         colors = {
@@ -224,6 +246,29 @@ class AdaptiveWatermarkForgerTests(unittest.TestCase):
                 max_new_tokens=4,
                 target_scored_pairs=4,
             )
+
+    def test_skips_queried_pairs_to_reach_the_unique_pair_target(self):
+        forger = AdaptiveWatermarkForger(
+            model=RepeatingCausalModel(),
+            tokenizer=TinyTokenizer(),
+            oracle=MappingOracle({}),
+            window_size=1,
+            max_candidates=1,
+        )
+
+        result = forger.forge(
+            "prompt",
+            max_new_tokens=4,
+            target_scored_pairs=3,
+        )
+
+        self.assertEqual(result.generated_token_num, 4)
+        self.assertEqual(result.scored_position_num, 3)
+        self.assertEqual(result.scored_token_num, 3)
+        self.assertEqual(result.unique_selected_pair_num, 3)
+        self.assertEqual(result.duplicate_selected_pair_num, 0)
+        self.assertEqual(result.oracle_query_count, 3)
+        self.assertEqual(len(set(forger.oracle.calls)), 3)
 
 
 def test_adaptive_forgery_curve_combines_cost_pvalue_and_asr():

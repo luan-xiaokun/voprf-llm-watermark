@@ -34,7 +34,7 @@ stages:
     num_samples: 1000
     batch_size: 1
     seed: 42
-    max_new_tokens: 1024
+    max_new_tokens: 350
     target_scored_pairs: 300
     watermark: &vow
       method: vow
@@ -57,7 +57,7 @@ stages:
     num_samples: 1000
     batch_size: 1
     seed: 42
-    max_new_tokens: 1024
+    max_new_tokens: 350
     target_scored_pairs: 300
     max_candidates: 2
     allow_special_tokens: false

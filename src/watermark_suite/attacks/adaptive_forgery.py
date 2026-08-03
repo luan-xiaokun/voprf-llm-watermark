@@ -319,6 +319,14 @@ class AdaptiveCandidateSelector:
         self.window_size = window_size
         self.max_candidates = max_candidates
         self._color_cache: dict[tuple[tuple[int, ...], int], bool] = {}
+        self._queried_token_ids_by_context: dict[
+            tuple[int, ...], set[int]
+        ] = {}
+
+    def queried_token_ids(self, context: tuple[int, ...]) -> frozenset[int]:
+        """Return tokens already submitted for ``context`` in this text."""
+
+        return frozenset(self._queried_token_ids_by_context.get(context, ()))
 
     def select(
         self,
@@ -363,6 +371,9 @@ class AdaptiveCandidateSelector:
                 is_green = bool(self.oracle.query(context, token_id))
                 oracle_time_seconds += time.perf_counter() - query_start
                 self._color_cache[pair] = is_green
+                self._queried_token_ids_by_context.setdefault(
+                    context, set()
+                ).add(token_id)
                 oracle_query_count += 1
 
             if is_green:
@@ -500,14 +511,31 @@ class AdaptiveWatermarkForger:
             if valid_suppressed:
                 scores[valid_suppressed] = -torch.inf
 
-            finite_candidate_num = int(torch.isfinite(scores).sum().item())
+            log_probabilities = torch.log_softmax(scores, dim=0)
+            candidate_scores = scores.clone()
+            if len(generated_token_ids) >= self.window_size:
+                context = tuple(
+                    generated_token_ids[-self.window_size :]
+                )
+                queried_token_ids = selector.queried_token_ids(context)
+                if queried_token_ids:
+                    candidate_scores[list(queried_token_ids)] = -torch.inf
+
+            finite_candidate_num = int(
+                torch.isfinite(candidate_scores).sum().item()
+            )
             candidate_num = min(self.max_candidates, finite_candidate_num)
             if candidate_num == 0:
-                raise RuntimeError("the local model has no finite candidate logits")
+                raise RuntimeError(
+                    "the local model has no unqueried finite candidate logits "
+                    "for the current context"
+                )
             candidate_token_ids = torch.topk(
-                scores, k=candidate_num, largest=True, sorted=True
+                candidate_scores,
+                k=candidate_num,
+                largest=True,
+                sorted=True,
             ).indices.tolist()
-            log_probabilities = torch.log_softmax(scores, dim=0)
 
             step = selector.select(
                 position=position,

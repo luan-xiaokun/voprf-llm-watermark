@@ -95,6 +95,7 @@ described by a YAML Experiment Plan:
 wmexp check experiments/plans/qwen25-main-and-forgery.yaml
 wmexp run experiments/plans/qwen25-main-and-forgery.yaml
 wmexp status experiments/plans/qwen25-main-and-forgery.yaml
+wmexp errors plan_SHA256_DIGEST --traceback
 ```
 
 The Plan uses Qwen2.5-7B for generation and adaptive forgery and Qwen2.5-14B

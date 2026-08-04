@@ -67,6 +67,17 @@ wmexp status plan_SHA256_DIGEST --json
 `status` does not change Attempt state and lists every stage in the resolved
 Plan, including stages that have not started.
 
+Inspect stored failures without querying SQLite directly:
+
+```bash
+wmexp errors plan_SHA256_DIGEST
+wmexp errors plan_SHA256_DIGEST --stage generate_pdw --traceback
+wmexp errors plan_SHA256_DIGEST --attempt attempt_ID --json
+```
+
+Prefer the registered Plan digest when the checkout has changed since the Run
+started. A Plan path is resolved against the current code revision.
+
 Use `--workspace PATH` on any command to replace the default
 `output/experiments` Experiment Workspace.
 

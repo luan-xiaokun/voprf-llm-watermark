@@ -810,3 +810,51 @@ class ExperimentWorkspace:
             attempts=tuple(attempts),
             artifacts=tuple(artifacts),
         )
+
+    def errors(
+        self,
+        plan_digest: str,
+        *,
+        instance_name: str | None = None,
+        attempt_identity: str | None = None,
+    ) -> tuple[JsonObject, ...]:
+        conditions = [
+            "plan_runs.plan_digest = ?",
+            "attempts.error_json IS NOT NULL",
+        ]
+        parameters: list[str] = [plan_digest]
+        if instance_name is not None:
+            conditions.append("plan_runs.instance_name = ?")
+            parameters.append(instance_name)
+        if attempt_identity is not None:
+            conditions.append("attempts.attempt_identity = ?")
+            parameters.append(attempt_identity)
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    plan_runs.instance_name,
+                    runs.stage_name,
+                    runs.stage_kind,
+                    attempts.attempt_identity,
+                    attempts.run_identity,
+                    attempts.state,
+                    attempts.error_json,
+                    attempts.created_at,
+                    attempts.updated_at
+                FROM plan_runs
+                JOIN runs USING (run_identity)
+                JOIN attempts USING (run_identity)
+                WHERE {' AND '.join(conditions)}
+                ORDER BY attempts.created_at DESC, plan_runs.instance_name
+                """,
+                parameters,
+            ).fetchall()
+
+        errors = []
+        for row in rows:
+            value = dict(row)
+            value["error"] = json.loads(value.pop("error_json"))
+            errors.append(value)
+        return tuple(errors)

@@ -79,6 +79,31 @@ def _parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Print machine-readable JSON."
     )
     _add_location_options(status)
+
+    errors = subparsers.add_parser(
+        "errors", help="Show failed Attempt errors for a Plan."
+    )
+    errors.add_argument(
+        "plan",
+        help="Experiment Plan path or a registered Plan digest.",
+    )
+    errors.add_argument(
+        "--stage",
+        help="Limit errors to one resolved stage instance.",
+    )
+    errors.add_argument(
+        "--attempt",
+        help="Limit errors to one Attempt identity.",
+    )
+    errors.add_argument(
+        "--traceback",
+        action="store_true",
+        help="Include stored tracebacks in human-readable output.",
+    )
+    errors.add_argument(
+        "--json", action="store_true", help="Print machine-readable JSON."
+    )
+    _add_location_options(errors)
     return parser
 
 
@@ -154,6 +179,28 @@ def _print_status(value: dict[str, Any]) -> None:
             )
 
 
+def _print_errors(
+    value: dict[str, Any], *, include_traceback: bool
+) -> None:
+    attempts = value["attempts"]
+    print(f"Plan: {value['plan_digest']}")
+    print(f"Errors: {len(attempts)}")
+    for attempt in attempts:
+        error = attempt["error"]
+        error_type = error.get("type") or "UnknownError"
+        message = error.get("message") or ""
+        print(
+            f"  {attempt['instance_name']}: "
+            f"{attempt['attempt_identity']} ({attempt['state']})"
+        )
+        print(f"    {error_type}: {message}")
+        traceback = error.get("traceback")
+        if include_traceback and traceback:
+            print("    Traceback:")
+            for line in str(traceback).splitlines():
+                print(f"      {line}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -190,6 +237,30 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report.succeeded else 1
 
         runs = _runs(args, enforce_clean=False)
+        if args.command == "errors":
+            plan_or_digest: str | Path = args.plan
+            if Path(args.plan).exists():
+                plan_or_digest = Path(args.plan)
+            errors = runs.errors(
+                plan_or_digest,
+                stage=args.stage,
+                attempt=args.attempt,
+            ).to_dict()
+            if args.json:
+                print(
+                    json.dumps(
+                        errors,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                )
+            else:
+                _print_errors(
+                    errors, include_traceback=args.traceback
+                )
+            return 0
+
         plan_or_digest: str | Path = args.plan
         if Path(args.plan).exists():
             plan_or_digest = Path(args.plan)

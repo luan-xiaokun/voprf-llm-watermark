@@ -32,6 +32,7 @@ from .models import (
     AttemptState,
     ExecutionReport,
     JsonObject,
+    PlanErrors,
     PlanStatus,
     PreparedStage,
     ResolvedExperimentPlan,
@@ -713,4 +714,25 @@ class ExperimentRuns:
             runs=tuple(runs),
             attempts=status.attempts,
             artifacts=status.artifacts,
+        )
+
+    def errors(
+        self,
+        plan: str | Path | ResolvedExperimentPlan,
+        *,
+        stage: str | None = None,
+        attempt: str | None = None,
+    ) -> PlanErrors:
+        resolved = self._load_plan(plan)
+        if stage is not None and stage not in {
+            item.instance_name for item in resolved.stages
+        }:
+            raise KeyError(f"unknown stage instance {stage!r}")
+        return PlanErrors(
+            plan_digest=resolved.plan_digest,
+            attempts=self.workspace.errors(
+                resolved.plan_digest,
+                instance_name=stage,
+                attempt_identity=attempt,
+            ),
         )

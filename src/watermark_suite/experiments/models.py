@@ -157,3 +157,12 @@ class PlanStatus:
 
     def to_dict(self) -> JsonObject:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class PlanErrors:
+    plan_digest: str
+    attempts: tuple[JsonObject, ...]
+
+    def to_dict(self) -> JsonObject:
+        return asdict(self)

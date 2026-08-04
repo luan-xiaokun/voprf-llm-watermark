@@ -19,7 +19,11 @@ from watermark_suite.experiments.adapters import (
     StageExecutionContext,
 )
 from watermark_suite.experiments.identity import identity_for, sha256_file
-from watermark_suite.experiments.cli import _print_check
+from watermark_suite.experiments.cli import (
+    _parser,
+    _print_check,
+    _print_errors,
+)
 from watermark_suite.experiments.models import (
     ArtifactRef,
     AttemptIdentity,
@@ -461,6 +465,87 @@ def test_caught_failure_resumes_same_attempt_and_keeps_checkpoint(tmp_path):
     assert resumed_report.resumed_attempts == (attempt.value,)
     assert sha256_file(first_chunk) == first_digest
     assert len(list((attempt_dir / "chunks").glob("*.jsonl"))) == 2
+
+
+def test_errors_returns_structured_failed_attempts_with_filters(tmp_path):
+    adapter = FakeStageAdapter()
+    plan_path = write_plan(
+        tmp_path / "plan.yaml",
+        {
+            "broken": {
+                "kind": "fake",
+                "value": "broken",
+                "fail_on": 0,
+            },
+            "pending": {"kind": "fake", "value": "pending"},
+        },
+    )
+    runs = experiment_runs(tmp_path, tmp_path / "workspace", adapter)
+
+    report = runs.execute(plan_path)
+    errors = runs.errors(plan_path).to_dict()
+
+    assert report.failed_stages == ("broken",)
+    assert errors["plan_digest"] == report.plan_digest
+    assert len(errors["attempts"]) == 1
+    failure = errors["attempts"][0]
+    assert failure["instance_name"] == "broken"
+    assert failure["state"] == "failed"
+    assert failure["error"]["type"] == "StageExecutionError"
+    assert failure["error"]["message"] == "failure at 0"
+    assert "RuntimeError: failure at 0" in failure["error"]["traceback"]
+    assert runs.errors(
+        plan_path,
+        stage="broken",
+        attempt=failure["attempt_identity"],
+    ).attempts == (failure,)
+    assert runs.errors(plan_path, stage="pending").attempts == ()
+
+    with pytest.raises(KeyError, match="unknown stage instance"):
+        runs.errors(plan_path, stage="missing")
+
+
+def test_errors_cli_parser_and_human_output(capsys):
+    args = _parser().parse_args(
+        [
+            "errors",
+            "plan_example",
+            "--stage",
+            "broken",
+            "--attempt",
+            "attempt_example",
+            "--traceback",
+        ]
+    )
+
+    assert args.command == "errors"
+    assert args.stage == "broken"
+    assert args.attempt == "attempt_example"
+    assert args.traceback is True
+
+    _print_errors(
+        {
+            "plan_digest": "plan_example",
+            "attempts": [
+                {
+                    "instance_name": "broken",
+                    "attempt_identity": "attempt_example",
+                    "state": "failed",
+                    "error": {
+                        "type": "StageExecutionError",
+                        "message": "boom",
+                        "traceback": "line one\nline two",
+                    },
+                }
+            ],
+        },
+        include_traceback=True,
+    )
+
+    output = capsys.readouterr().out
+    assert "Errors: 1" in output
+    assert "StageExecutionError: boom" in output
+    assert "line one" in output
 
 
 def test_attempt_lease_rejects_a_second_executor(tmp_path):

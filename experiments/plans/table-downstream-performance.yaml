@@ -52,6 +52,7 @@ stages:
           bit_size: 2
           message_length: 8
           max_planted_errors: 2
+          max_generation_attempts: 3
           seed: 0
         - &upv
           method: upv

@@ -565,6 +565,9 @@ def test_downstream_plan_contract(monkeypatch):
         "num_beams": 1,
         "effective_sampling": "multinomial",
     }
+    assert (
+        pdw.semantic_settings["watermark"]["max_generation_attempts"] == 3
+    )
     assert all(
         stage.semantic_settings["decoding"]
         == {"do_sample": False, "num_beams": 1}

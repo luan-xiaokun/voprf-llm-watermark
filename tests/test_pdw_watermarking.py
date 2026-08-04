@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import random
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
 import torch
 from transformers import DynamicCache
 
@@ -68,6 +71,97 @@ def test_pdw_downstream_generation_uses_stochastic_candidates(monkeypatch):
     )
 
     assert texts == ["WATERMARK ME"]
+
+
+def test_pdw_retries_with_distinct_reproducible_seeds(monkeypatch):
+    observed_seeds = []
+
+    def generate_text(*args, **kwargs):
+        del args, kwargs
+        observed_seeds.append(
+            (
+                torch.initial_seed(),
+                int(np.random.get_state()[1][0]),
+                random.getstate()[1][0],
+            )
+        )
+        if len(observed_seeds) % 3 != 0:
+            raise ValueError(
+                "tried to plant another error but already at "
+                "max_planted_errors: 2"
+            )
+        return "forged", torch.tensor([]), b"", (), 0, 0
+
+    monkeypatch.setattr(watermarking, "generate_text_asymmetric", generate_text)
+    adapter = watermarking.PDWAdapter(
+        model=object(),
+        tokenizer=object(),
+        max_generation_attempts=3,
+    )
+
+    first = adapter(
+        prompts=["watermark me"],
+        max_new_tokens=32,
+        seed=17,
+    )
+    first_seeds = list(observed_seeds)
+    observed_seeds.clear()
+    second = adapter(
+        prompts=["watermark me"],
+        max_new_tokens=32,
+        seed=17,
+    )
+
+    assert first == second == ["forged"]
+    assert len(set(first_seeds)) == 3
+    assert observed_seeds == first_seeds
+
+
+def test_pdw_reports_retry_exhaustion(monkeypatch):
+    calls = 0
+
+    def generate_text(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise ValueError(
+            "tried to plant another error but already at "
+            "max_planted_errors: 2"
+        )
+
+    monkeypatch.setattr(watermarking, "generate_text_asymmetric", generate_text)
+    adapter = watermarking.PDWAdapter(
+        model=object(),
+        tokenizer=object(),
+        max_generation_attempts=3,
+    )
+
+    with pytest.raises(RuntimeError, match="after 3 attempts"):
+        adapter(prompts=["watermark me"], max_new_tokens=32, seed=17)
+
+    assert calls == 3
+
+
+def test_pdw_does_not_retry_non_stochastic_errors(monkeypatch):
+    calls = 0
+
+    def generate_text(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        raise ValueError("invalid PDW key material")
+
+    monkeypatch.setattr(watermarking, "generate_text_asymmetric", generate_text)
+    adapter = watermarking.PDWAdapter(
+        model=object(),
+        tokenizer=object(),
+        max_generation_attempts=3,
+    )
+
+    with pytest.raises(ValueError, match="invalid PDW key material"):
+        adapter(prompts=["watermark me"], max_new_tokens=32, seed=17)
+
+    assert calls == 1
 
 
 def test_pdw_retries_signature_candidates_from_the_same_cache(monkeypatch):

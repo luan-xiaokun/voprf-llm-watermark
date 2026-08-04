@@ -140,6 +140,7 @@ def _resolve_pdw(value: JsonObject, repository: Path) -> JsonObject:
         "bit_size",
         "message_length",
         "max_planted_errors",
+        "max_generation_attempts",
         "seed",
     }
     missing = sorted(required - set(value))
@@ -158,7 +159,11 @@ def _resolve_pdw(value: JsonObject, repository: Path) -> JsonObject:
         raise PlanValidationError(
             "pdw segment, bit, and message lengths must be positive"
         )
-    resolved = {**value, "implementation_revision": "pdw-cache-safe-v1"}
+    if value["max_generation_attempts"] <= 0:
+        raise PlanValidationError(
+            "pdw max_generation_attempts must be positive"
+        )
+    resolved = {**value, "implementation_revision": "pdw-seeded-retry-v2"}
     for field in ("sk_path", "pk_path", "params_path"):
         path, digest = _file(
             value[field], repository, label=f"PDW {field}"
@@ -400,6 +405,7 @@ def _pdw_generator(value: JsonObject, model: Any, tokenizer: Any) -> Any:
         bit_size=value["bit_size"],
         message_length=value["message_length"],
         max_planted_errors=value["max_planted_errors"],
+        max_generation_attempts=value["max_generation_attempts"],
         seed=value["seed"],
         timing=False,
     )
@@ -533,6 +539,7 @@ class WatermarkSchemeRegistry:
                 "bit_size",
                 "message_length",
                 "max_planted_errors",
+                "max_generation_attempts",
                 "seed",
             ),
             "upv": (
@@ -625,6 +632,7 @@ WATERMARK_SCHEMES = WatermarkSchemeRegistry(
                 "bit_size",
                 "message_length",
                 "max_planted_errors",
+                "max_generation_attempts",
                 "seed",
             },
             _resolve_pdw,

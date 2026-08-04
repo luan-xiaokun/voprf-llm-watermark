@@ -143,6 +143,7 @@ def test_external_watermark_material_is_reverified(method, tmp_path):
             "bit_size": 2,
             "message_length": 2,
             "max_planted_errors": 0,
+            "max_generation_attempts": 3,
             "seed": 1,
         }
         for name in ("sk", "pk", "params"):
@@ -225,9 +226,11 @@ def test_pdw_run_semantics_identify_cache_safe_generation(tmp_path):
             "bit_size": 2,
             "message_length": 8,
             "max_planted_errors": 2,
+            "max_generation_attempts": 3,
             "seed": 0,
         },
         tmp_path,
     )
 
-    assert watermark["implementation_revision"] == "pdw-cache-safe-v1"
+    assert watermark["implementation_revision"] == "pdw-seeded-retry-v2"
+    assert watermark["max_generation_attempts"] == 3

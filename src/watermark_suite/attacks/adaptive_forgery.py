@@ -254,7 +254,6 @@ class AdaptiveForgeryResult:
     mean_selected_negative_log_likelihood: float | None
     local_model_perplexity: float | None
     mean_log_probability_gap: float | None
-    tokenization_preserved: bool
     oracle_protocol_stats: ColorOracleStats | None
 
     def to_dict(self, trace_level: str = "compact") -> dict:
@@ -641,8 +640,6 @@ class AdaptiveWatermarkForger:
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False,
         )
-        roundtrip_token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-
         scored_steps = [step for step in steps if step.selected_green is not None]
         selected_pair_colors: dict[
             tuple[tuple[int, ...], int], bool
@@ -765,7 +762,6 @@ class AdaptiveWatermarkForger:
                 if log_probability_gaps
                 else None
             ),
-            tokenization_preserved=roundtrip_token_ids == generated_token_ids,
             oracle_protocol_stats=oracle_protocol_stats,
         )
 

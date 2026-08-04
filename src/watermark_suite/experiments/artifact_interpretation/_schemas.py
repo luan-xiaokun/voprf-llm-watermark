@@ -1049,6 +1049,12 @@ schema_registry: dict[tuple[str, str], _SchemaAdapter] = {
         _parse_forgery,
         _stream_records,
     ),
+    ("adaptive-forgery", "adaptive-forgery-v4"): _SchemaAdapter(
+        "adaptive-forgery",
+        "adaptive-forgery-v4",
+        _parse_forgery,
+        _stream_records,
+    ),
     ("robustness", "robustness-text-v2"): _SchemaAdapter(
         "robustness",
         "robustness-text-v2",

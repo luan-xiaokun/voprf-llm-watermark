@@ -114,7 +114,6 @@ def build_sample_metrics(result: Any, detection: Any | None = None) -> JsonObjec
             if result.elapsed_seconds
             else 0.0
         ),
-        "tokenization_preserved": result.tokenization_preserved,
     }
     if detection is not None:
         metrics.update(
@@ -288,15 +287,6 @@ def build_summary(
         "communication_bytes_per_oracle_query": (
             communication_bytes / total_queries if total_queries else 0.0
         ),
-        "tokenization_preserved_ratio": (
-            sum(
-                record["tokenization_preserved"]
-                for record in forgery_records
-            )
-            / len(forgery_records)
-            if forgery_records
-            else 0.0
-        ),
         "total_elapsed_seconds": elapsed_seconds,
         "mean_forgery_seconds": (
             statistics.mean(
@@ -348,7 +338,7 @@ def build_summary(
 
 class AdaptiveForgeryStageAdapter:
     kind = "adaptive-forgery"
-    revision = "adaptive-forgery-v3"
+    revision = "adaptive-forgery-v4"
     accepted_settings = {
         "model",
         "dataset",
@@ -452,7 +442,7 @@ class AdaptiveForgeryStageAdapter:
             },
             semantic_settings=semantic,
             execution_settings=execution,
-            artifact_schema_revision="adaptive-forgery-v3",
+            artifact_schema_revision="adaptive-forgery-v4",
             resource_key=(
                 f"causal:{model['checkpoint']}@{model['revision']}:"
                 f"{settings['device']}:{settings['dtype']}"
@@ -577,12 +567,6 @@ class _AdaptiveForgeryExecution:
                 ),
                 stop_on_eos=True,
             )
-            if not result.tokenization_preserved:
-                raise PlanValidationError(
-                    f"forged Sample {sample.sample_id} changed under "
-                    "decode/re-tokenize"
-                )
-            validation = self._validate_prefix(result.text, result)
             records.append(
                 {
                     "sample_id": sample.sample_id,
@@ -592,46 +576,10 @@ class _AdaptiveForgeryExecution:
                     "adaptive_forgery": result.to_dict(
                         trace_level=semantic["trace_level"]
                     ),
-                    "forgery_validation": validation,
                     "sample_metrics": build_sample_metrics(result),
                 }
             )
         return WorkResult(records=tuple(records))
-
-    def _validate_prefix(
-        self,
-        text: str,
-        result: Any,
-    ) -> JsonObject:
-        token_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        width = self.forger.window_size
-        scored_pairs = {
-            tuple(token_ids[index - width : index + 1])
-            for index in range(width, len(token_ids))
-        }
-        validation = {
-            "policy": "tokenizer-roundtrip-unique-ngram-v1",
-            "context_width": width,
-            "effective_token_num": len(scored_pairs),
-            "total_token_num": len(token_ids),
-        }
-        target = self.context.semantic_settings["target_scored_pairs"]
-        if (
-            target is not None
-            and validation["effective_token_num"] != target
-        ):
-            raise PlanValidationError(
-                "forged prefix does not contain the requested number of "
-                f"detector-scored pairs: expected {target}, observed "
-                f"{validation['effective_token_num']}"
-            )
-        if (
-            validation["effective_token_num"] != result.scored_token_num
-        ):
-            raise PlanValidationError(
-                "adaptive pair accounting disagrees with the retained prefix"
-            )
-        return validation
 
     def summarize(self, records: list[JsonObject]) -> JsonObject:
         semantic = self.context.semantic_settings

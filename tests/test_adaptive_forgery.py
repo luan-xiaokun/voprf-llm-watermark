@@ -65,6 +65,29 @@ class TinyTokenizer:
         return [int(piece) for piece in text.split(",")] if text else []
 
 
+class NonRoundTripCandidateTokenizer(TinyTokenizer):
+    def decode(
+        self,
+        token_ids: list[int],
+        skip_special_tokens: bool,
+        clean_up_tokenization_spaces: bool,
+    ) -> str:
+        del skip_special_tokens, clean_up_tokenization_spaces
+        pieces = {1: "x", 2: "y"}
+        return "".join(
+            pieces.get(token_id, str(token_id))
+            for token_id in token_ids
+        )
+
+    def encode(self, text: str, add_special_tokens: bool) -> list[int]:
+        del add_special_tokens
+        if text == "x":
+            return [2]
+        if text == "y":
+            return [2]
+        return super().encode(text, add_special_tokens=False)
+
+
 class TinyCausalModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -203,7 +226,6 @@ class AdaptiveWatermarkForgerTests(unittest.TestCase):
         self.assertAlmostEqual(result.mean_log_probability_gap, 0.25)
         self.assertGreater(result.local_model_perplexity, 1.0)
         self.assertIsNone(result.oracle_protocol_stats)
-        self.assertTrue(result.tokenization_preserved)
 
         compact = result.to_dict(trace_level="compact")
         self.assertEqual(len(compact["trace"]), 4)
@@ -269,6 +291,19 @@ class AdaptiveWatermarkForgerTests(unittest.TestCase):
         self.assertEqual(result.duplicate_selected_pair_num, 0)
         self.assertEqual(result.oracle_query_count, 3)
         self.assertEqual(len(set(forger.oracle.calls)), 3)
+
+    def test_does_not_filter_candidate_for_decode_encode_roundtrip(self):
+        forger = AdaptiveWatermarkForger(
+            model=TinyCausalModel(),
+            tokenizer=NonRoundTripCandidateTokenizer(),
+            oracle=MappingOracle({}),
+            window_size=1,
+            max_candidates=1,
+        )
+
+        result = forger.forge("prompt", max_new_tokens=1)
+
+        self.assertEqual(result.token_ids, [1])
 
 
 def test_adaptive_forgery_curve_combines_cost_pvalue_and_asr():
@@ -407,7 +442,6 @@ class VOPRFColorOracleTests(unittest.TestCase):
                     (step.context, step.selected_token_id)
                 ] = step.selected_green
 
-        self.assertTrue(forgery.tokenization_preserved)
         self.assertEqual(
             detection.effective_token_num, len(unique_selected_pairs)
         )

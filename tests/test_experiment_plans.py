@@ -242,6 +242,15 @@ def test_usenix_forgery_plan_matches_the_table_design(monkeypatch):
     controls = [stage for stage in plan.stages if stage.kind == "generation"]
     assert len(controls) == 1
     assert controls[0].semantic_settings["watermark"]["method"] == "none"
+    assert controls[0].semantic_settings["generation"] == {
+        "max_new_tokens": 300,
+        "do_sample": True,
+        "top_p": None,
+        "top_k": 50,
+        "temperature": 0.7,
+        "suppress_eos": True,
+        "stop_strings": None,
+    }
 
     report = next(
         stage

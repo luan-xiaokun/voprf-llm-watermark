@@ -113,7 +113,9 @@ stages:
     prompt_field: prompt_text
     target_field: generated_text
 
-  # A separate greedy control makes the manuscript's PPL comparison explicit.
+  # Match the ordinary Qwen2.5-3B-Instruct sampling policy used by the
+  # USENIX robustness experiment while suppressing EOS for a full-length
+  # 300-token PPL control.
   generate_unwatermarked:
     kind: generation
     model: qwen-forger
@@ -123,10 +125,10 @@ stages:
     batch_size: 24
     seed: 42
     max_new_tokens: 300
-    do_sample: false
+    do_sample: true
     top_p: null
-    top_k: null
-    temperature: null
+    top_k: 50
+    temperature: 0.7
     suppress_eos: true
     stop_strings: null
     watermark:

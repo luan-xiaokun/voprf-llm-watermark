@@ -366,6 +366,7 @@ def test_robustness_stage_records_openai_response_provenance(
             assert texts == ["source text"]
             assert settings["model"] == "gpt-5.6-sol"
             assert settings["reasoning_effort"] == "low"
+            assert settings["concurrency"] == 4
             return [
                 OpenAIParaphraseResult(
                     text="rewritten text",
@@ -414,6 +415,7 @@ def test_robustness_stage_records_openai_response_provenance(
                 "instruction": "rewrite",
             },
             "batch_size": 8,
+            "openai_concurrency": 4,
             "target_field": "generated_text",
             "seed": 42,
             "device": "cpu",
@@ -422,6 +424,8 @@ def test_robustness_stage_records_openai_response_provenance(
         resolution_context(tmp_path),
     )
     bound = adapter.bind_inputs(definition, (source,))
+    assert "openai_concurrency" not in bound.semantic_settings
+    assert bound.execution_settings["openai_concurrency"] == 4
     execution = adapter.prepare(
         execution_context(
             tmp_path,

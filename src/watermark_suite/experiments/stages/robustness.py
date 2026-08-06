@@ -176,12 +176,13 @@ class RobustnessStageAdapter:
     accepted_settings = {
         "transformation",
         "batch_size",
+        "openai_concurrency",
         "target_field",
         "seed",
         "device",
         "dtype",
     }
-    _required = accepted_settings
+    _required = accepted_settings - {"openai_concurrency"}
 
     def resolve(
         self,
@@ -194,6 +195,16 @@ class RobustnessStageAdapter:
             "batch_size"
         ] <= 0:
             raise PlanValidationError("batch_size must be positive")
+        openai_concurrency = settings.get(
+            "openai_concurrency",
+            settings["batch_size"],
+        )
+        if (
+            not isinstance(openai_concurrency, int)
+            or isinstance(openai_concurrency, bool)
+            or openai_concurrency <= 0
+        ):
+            raise PlanValidationError("openai_concurrency must be positive")
         if not isinstance(settings["seed"], int):
             raise PlanValidationError("seed must be an integer")
         if (
@@ -228,6 +239,7 @@ class RobustnessStageAdapter:
             execution_settings={
                 "device": settings["device"],
                 "dtype": settings["dtype"],
+                "openai_concurrency": openai_concurrency,
             },
             artifact_schema_revision="robustness-text-v2",
             resource_key=resource_key,
@@ -356,7 +368,9 @@ class _RobustnessExecution:
         elif transformation["method"] == "openai-paraphrase":
             paraphrases = self.paraphraser.paraphrase_many(
                 texts,
-                concurrency=semantic["batch_size"],
+                concurrency=self.context.execution_settings[
+                    "openai_concurrency"
+                ],
                 model=transformation["model"],
                 instruction=transformation["instruction"],
                 max_output_tokens=transformation["max_output_tokens"],

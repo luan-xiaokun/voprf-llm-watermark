@@ -327,6 +327,76 @@ class FakeResponses:
         )
 
 
+class FakeOpenAIError(RuntimeError):
+    def __init__(self, status_code):
+        super().__init__(f"OpenAI status {status_code}")
+        self.status_code = status_code
+
+
+def test_openai_paraphraser_retries_transient_server_errors():
+    class EventuallySuccessfulResponses(FakeResponses):
+        def create(self, **request):
+            if len(self.requests) < 3:
+                self.requests.append(request)
+                raise FakeOpenAIError(500)
+            return super().create(**request)
+
+    responses = EventuallySuccessfulResponses()
+    paraphraser = OpenAIParaphraser(
+        SimpleNamespace(responses=responses),
+        max_attempts=4,
+        initial_retry_delay_seconds=0,
+    )
+
+    result = paraphraser.paraphrase(
+        "original",
+        model="gpt-5.6-luna",
+        instruction="rewrite",
+        max_output_tokens=600,
+        temperature=None,
+        reasoning_effort="low",
+        request_identity="sample:1",
+    )
+
+    assert result.text == "rewritten text"
+    assert result.provenance["application_attempts"] == 4
+    assert len(responses.requests) == 4
+
+
+def test_openai_paraphraser_does_not_retry_bad_requests():
+    class InvalidResponses:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **request):
+            del request
+            self.calls += 1
+            raise FakeOpenAIError(400)
+
+    responses = InvalidResponses()
+    paraphraser = OpenAIParaphraser(
+        SimpleNamespace(responses=responses),
+        max_attempts=4,
+        initial_retry_delay_seconds=0,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="model='gpt-3.5-turbo'.*sample_id='sample:2'",
+    ):
+        paraphraser.paraphrase(
+            "original",
+            model="gpt-3.5-turbo",
+            instruction="rewrite",
+            max_output_tokens=600,
+            temperature=0.7,
+            reasoning_effort=None,
+            request_identity="sample:2",
+        )
+
+    assert responses.calls == 1
+
+
 def test_openai_paraphraser_only_sends_reasoning_for_reasoning_models():
     responses = FakeResponses()
     paraphraser = OpenAIParaphraser(
@@ -437,8 +507,12 @@ def test_robustness_stage_records_openai_response_provenance(
     import watermark_suite.experiments.stages.robustness as module
 
     class FakeParaphraser:
+        def __init__(self, *, max_attempts):
+            assert max_attempts == 4
+
         def paraphrase_many(self, texts, **settings):
             assert texts == ["source text"]
+            assert settings["request_identities"] == ["sample:1"]
             assert settings["model"] == "gpt-5.6-sol"
             assert settings["reasoning_effort"] == "low"
             assert settings["concurrency"] == 4
@@ -491,6 +565,7 @@ def test_robustness_stage_records_openai_response_provenance(
             },
             "batch_size": 8,
             "openai_concurrency": 4,
+            "openai_max_attempts": 4,
             "target_field": "generated_text",
             "seed": 42,
             "device": "cpu",
@@ -501,6 +576,7 @@ def test_robustness_stage_records_openai_response_provenance(
     bound = adapter.bind_inputs(definition, (source,))
     assert "openai_concurrency" not in bound.semantic_settings
     assert bound.execution_settings["openai_concurrency"] == 4
+    assert bound.execution_settings["openai_max_attempts"] == 4
     execution = adapter.prepare(
         execution_context(
             tmp_path,

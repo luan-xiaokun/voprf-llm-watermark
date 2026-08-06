@@ -158,6 +158,7 @@ stages:
     input: generate_robustness
     batch_size: 16
     openai_concurrency: 4
+    openai_max_attempts: 4
     target_field: generated_text
     seed: 42
     sweep:
@@ -194,6 +195,7 @@ stages:
     input: generate_rdf_robustness
     batch_size: 8
     openai_concurrency: 4
+    openai_max_attempts: 4
     target_field: generated_text
     seed: 42
     sweep:
@@ -207,6 +209,7 @@ stages:
     input: generate_pdw_robustness
     batch_size: 8
     openai_concurrency: 4
+    openai_max_attempts: 4
     target_field: generated_text
     seed: 42
     sweep:

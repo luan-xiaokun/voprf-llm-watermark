@@ -57,12 +57,36 @@ class OpenAIParaphraseResult:
 class OpenAIParaphraser:
     """Responses API boundary for reproducible paraphrase transformations."""
 
-    def __init__(self, client: Any = None) -> None:
+    def __init__(
+        self,
+        client: Any = None,
+        *,
+        max_attempts: int = 4,
+        initial_retry_delay_seconds: float = 2.0,
+    ) -> None:
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if initial_retry_delay_seconds < 0:
+            raise ValueError(
+                "initial_retry_delay_seconds must not be negative"
+            )
         if client is None:
             from openai import OpenAI
 
             client = OpenAI()
         self._client = client
+        self._max_attempts = max_attempts
+        self._initial_retry_delay_seconds = initial_retry_delay_seconds
+
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        status_code = getattr(error, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code in {408, 409, 429} or status_code >= 500
+        return type(error).__name__ in {
+            "APIConnectionError",
+            "APITimeoutError",
+        }
 
     def paraphrase(
         self,
@@ -73,6 +97,7 @@ class OpenAIParaphraser:
         max_output_tokens: int,
         temperature: float | None,
         reasoning_effort: str | None,
+        request_identity: str | None = None,
     ) -> OpenAIParaphraseResult:
         request: JsonObject = {
             "model": model,
@@ -87,7 +112,31 @@ class OpenAIParaphraser:
             request["reasoning"] = {"effort": reasoning_effort}
 
         started = time.perf_counter()
-        response = self._client.responses.create(**request)
+        response = None
+        attempts = 0
+        while attempts < self._max_attempts:
+            attempts += 1
+            try:
+                response = self._client.responses.create(**request)
+                break
+            except Exception as error:
+                if (
+                    attempts >= self._max_attempts
+                    or not self._is_retryable(error)
+                ):
+                    raise RuntimeError(
+                        "OpenAI paraphrase request failed "
+                        f"after {attempts} application attempt(s) "
+                        f"(model={model!r}, "
+                        f"sample_id={request_identity!r}): {error}"
+                    ) from error
+                delay = min(
+                    self._initial_retry_delay_seconds
+                    * (2 ** (attempts - 1)),
+                    30.0,
+                )
+                time.sleep(delay)
+        assert response is not None
         latency_seconds = time.perf_counter() - started
         status = _field(response, "status")
         if status != "completed":
@@ -113,6 +162,7 @@ class OpenAIParaphraser:
                 "response_created_at": _field(response, "created_at"),
                 "service_tier": _field(response, "service_tier"),
                 "reasoning_effort": reasoning_effort,
+                "application_attempts": attempts,
                 "latency_seconds": latency_seconds,
                 "usage": _usage(response),
             },
@@ -128,8 +178,17 @@ class OpenAIParaphraser:
         max_output_tokens: int,
         temperature: float | None,
         reasoning_effort: str | None,
+        request_identities: list[str] | None = None,
     ) -> list[OpenAIParaphraseResult]:
-        def call(text: str) -> OpenAIParaphraseResult:
+        if request_identities is None:
+            request_identities = [None] * len(texts)
+        elif len(request_identities) != len(texts):
+            raise ValueError(
+                "request_identities must have the same length as texts"
+            )
+
+        def call(item: tuple[str, str | None]) -> OpenAIParaphraseResult:
+            text, request_identity = item
             return self.paraphrase(
                 text,
                 model=model,
@@ -137,11 +196,13 @@ class OpenAIParaphraser:
                 max_output_tokens=max_output_tokens,
                 temperature=temperature,
                 reasoning_effort=reasoning_effort,
+                request_identity=request_identity,
             )
 
+        requests = list(zip(texts, request_identities))
         if len(texts) <= 1:
-            return [call(text) for text in texts]
+            return [call(request) for request in requests]
         with ThreadPoolExecutor(
             max_workers=min(concurrency, len(texts))
         ) as executor:
-            return list(executor.map(call, texts))
+            return list(executor.map(call, requests))

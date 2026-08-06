@@ -192,12 +192,16 @@ class RobustnessStageAdapter:
         "transformation",
         "batch_size",
         "openai_concurrency",
+        "openai_max_attempts",
         "target_field",
         "seed",
         "device",
         "dtype",
     }
-    _required = accepted_settings - {"openai_concurrency"}
+    _required = accepted_settings - {
+        "openai_concurrency",
+        "openai_max_attempts",
+    }
 
     def resolve(
         self,
@@ -220,6 +224,13 @@ class RobustnessStageAdapter:
             or openai_concurrency <= 0
         ):
             raise PlanValidationError("openai_concurrency must be positive")
+        openai_max_attempts = settings.get("openai_max_attempts", 4)
+        if (
+            not isinstance(openai_max_attempts, int)
+            or isinstance(openai_max_attempts, bool)
+            or openai_max_attempts <= 0
+        ):
+            raise PlanValidationError("openai_max_attempts must be positive")
         if not isinstance(settings["seed"], int):
             raise PlanValidationError("seed must be an integer")
         if (
@@ -255,6 +266,7 @@ class RobustnessStageAdapter:
                 "device": settings["device"],
                 "dtype": settings["dtype"],
                 "openai_concurrency": openai_concurrency,
+                "openai_max_attempts": openai_max_attempts,
             },
             artifact_schema_revision="robustness-text-v2",
             resource_key=resource_key,
@@ -301,7 +313,11 @@ class _RobustnessExecution:
         self.records = artifact_records(context.inputs[0])
         transformation = context.semantic_settings["transformation"]
         self.paraphraser = (
-            OpenAIParaphraser()
+            OpenAIParaphraser(
+                max_attempts=context.execution_settings[
+                    "openai_max_attempts"
+                ]
+            )
             if transformation["method"] == "openai-paraphrase"
             else None
         )
@@ -383,6 +399,9 @@ class _RobustnessExecution:
         elif transformation["method"] == "openai-paraphrase":
             paraphrases = self.paraphraser.paraphrase_many(
                 texts,
+                request_identities=[
+                    str(record["sample_id"]) for record in item.payload
+                ],
                 concurrency=self.context.execution_settings[
                     "openai_concurrency"
                 ],

@@ -44,6 +44,22 @@ class FakeTokenizer:
         return " ".join(self._id_to_token[value] for value in token_ids)
 
 
+class ExpandingRoundTripTokenizer(FakeTokenizer):
+    def decode(
+        self,
+        token_ids,
+        *,
+        skip_special_tokens,
+        clean_up_tokenization_spaces,
+    ):
+        decoded = super().decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+        )
+        return decoded + " cats cats cats"
+
+
 class FakeUnmasker:
     def __init__(self) -> None:
         self.model = SimpleNamespace(
@@ -142,6 +158,51 @@ def test_long_text_uses_mask_centered_windows_without_duplication():
     assert len(unmasker.requests) == 4
     assert all(len(tokenizer.encode(text, add_special_tokens=False)) <= 8
                for text in unmasker.requests)
+
+
+def test_masked_windows_fit_after_decode_retokenize_expands_them():
+    tokenizer = ExpandingRoundTripTokenizer()
+
+    class LengthCheckingUnmasker(FakeUnmasker):
+        def __call__(self, texts, *, top_k, batch_size):
+            for text in texts:
+                encoded_length = len(
+                    tokenizer.encode(text, add_special_tokens=False)
+                ) + tokenizer.num_special_tokens_to_add(pair=False)
+                if encoded_length > self.model.config.max_position_embeddings:
+                    raise RuntimeError(
+                        f"input length {encoded_length} exceeds position "
+                        f"limit {self.model.config.max_position_embeddings}"
+                    )
+            return super().__call__(
+                texts,
+                top_k=top_k,
+                batch_size=batch_size,
+            )
+
+    unmasker = LengthCheckingUnmasker()
+    replacer = SynonymReplacer(
+        tokenizer,
+        unmasker,
+        pos_tagger=fake_pos_tagger,
+    )
+
+    result = replacer.replace_many(
+        [" ".join(["cats"] * 40)],
+        seeds=[7],
+        replacement_rate=0.1,
+        top_k=15,
+        candidate_sampling="score-weighted",
+        batch_size=4,
+    )[0]
+
+    assert result.selected_word_count == 4
+    assert all(
+        len(tokenizer.encode(text, add_special_tokens=False))
+        + tokenizer.num_special_tokens_to_add(pair=False)
+        <= tokenizer.model_max_length
+        for text in unmasker.requests
+    )
 
 
 def test_failed_candidates_are_reported_without_changing_text():

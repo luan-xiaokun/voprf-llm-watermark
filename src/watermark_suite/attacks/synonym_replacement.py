@@ -129,17 +129,49 @@ class SynonymReplacer:
         left_num = min(
             len(prefix_ids), context_budget - right_num
         )
-        selected_prefix = prefix_ids[-left_num:] if left_num else []
-        token_ids = [
-            *selected_prefix,
-            self.tokenizer.mask_token_id,
-            *suffix_ids[:right_num],
-        ]
-        return self.tokenizer.decode(
-            token_ids,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=False,
-        )
+        while True:
+            selected_prefix = prefix_ids[-left_num:] if left_num else []
+            token_ids = [
+                *selected_prefix,
+                self.tokenizer.mask_token_id,
+                *suffix_ids[:right_num],
+            ]
+            masked_context = self.tokenizer.decode(
+                token_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            round_trip_ids = self.tokenizer.encode(
+                masked_context,
+                add_special_tokens=False,
+            )
+            mask_count = round_trip_ids.count(
+                self.tokenizer.mask_token_id
+            )
+            if mask_count != 1:
+                raise RuntimeError(
+                    "masked context must contain exactly one mask token "
+                    f"after decode/re-tokenize; found {mask_count}"
+                )
+            encoded_length = len(round_trip_ids) + special_token_num
+            if encoded_length <= self.model_max_length:
+                return masked_context
+
+            retained_context_num = left_num + right_num
+            if retained_context_num == 0:
+                raise RuntimeError(
+                    "masked token alone exceeds the masked-LM position "
+                    f"limit of {self.model_max_length}"
+                )
+            trim_num = min(
+                encoded_length - self.model_max_length,
+                retained_context_num,
+            )
+            for _ in range(trim_num):
+                if left_num >= right_num and left_num:
+                    left_num -= 1
+                else:
+                    right_num -= 1
 
     def _prepare_text(
         self,

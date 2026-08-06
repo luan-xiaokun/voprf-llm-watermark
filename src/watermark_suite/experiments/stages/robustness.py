@@ -91,7 +91,11 @@ def _resolve_transformation(
             models=context.models,
             repository=context.repository,
         )
-        return {**value, "model": model}
+        return {
+            **value,
+            "model": model,
+            "implementation_revision": "masked-lm-roundtrip-window-v2",
+        }
     if method == "word-deletion":
         unknown = sorted(set(value) - {"method", "rate"})
         if unknown:

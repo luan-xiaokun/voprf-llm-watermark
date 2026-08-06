@@ -382,6 +382,9 @@ def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
         for value in replacements
     )
     assert {
+        value["implementation_revision"] for value in replacements
+    } == {"masked-lm-roundtrip-window-v2"}
+    assert {
         value["model"]["checkpoint"] for value in replacements
     } == {"distilbert/distilbert-base-uncased"}
     paraphrases = [
@@ -405,6 +408,9 @@ def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
         "gpt-5.6-sol": "low",
     }
     assert {value["temperature"] for value in paraphrases} == {0.7}
+    assert all(
+        "implementation_revision" not in value for value in paraphrases
+    )
     clean_detection = [
         stage
         for stage in plan.stages

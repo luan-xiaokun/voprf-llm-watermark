@@ -238,11 +238,14 @@ def test_usenix_forgery_plan_matches_the_table_design(monkeypatch):
     perplexities = [
         stage for stage in plan.stages if stage.kind == "perplexity"
     ]
-    assert len(perplexities) == 8
+    assert len(perplexities) == 9
     controls = [stage for stage in plan.stages if stage.kind == "generation"]
-    assert len(controls) == 1
-    assert controls[0].semantic_settings["watermark"]["method"] == "none"
-    assert controls[0].semantic_settings["generation"] == {
+    assert len(controls) == 2
+    assert {
+        stage.semantic_settings["watermark"]["method"]
+        for stage in controls
+    } == {"none", "vow"}
+    expected_control_generation = {
         "max_new_tokens": 300,
         "do_sample": True,
         "top_p": None,
@@ -251,13 +254,26 @@ def test_usenix_forgery_plan_matches_the_table_design(monkeypatch):
         "suppress_eos": True,
         "stop_strings": None,
     }
+    assert all(
+        stage.semantic_settings["generation"]
+        == expected_control_generation
+        for stage in controls
+    )
+    honest_vow = next(
+        stage
+        for stage in controls
+        if stage.semantic_settings["watermark"]["method"] == "vow"
+    )
+    assert honest_vow.semantic_settings["watermark"]["window_size"] == 4
+    assert honest_vow.semantic_settings["watermark"]["gamma"] == 0.5
+    assert honest_vow.semantic_settings["watermark"]["delta"] == 2.5
 
     report = next(
         stage
         for stage in plan.stages
         if stage.kind == "result-aggregation"
     )
-    assert len(report.input_instances) == 15
+    assert len(report.input_instances) == 16
     assert report.semantic_settings["threshold_policy"] == {
         "default": 0.00001
     }

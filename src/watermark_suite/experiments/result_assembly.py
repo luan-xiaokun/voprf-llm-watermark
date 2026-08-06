@@ -63,7 +63,7 @@ def _wilson(
 class ResultAssembler:
     """Join interpreted scientific facts into recipe-specific report rows."""
 
-    revision = f"result-assembly-v3+{ARTIFACT_INTERPRETATION_REVISION}"
+    revision = f"result-assembly-v4+{ARTIFACT_INTERPRETATION_REVISION}"
 
     def __init__(
         self,
@@ -717,16 +717,41 @@ class ResultAssembler:
             raise PlanValidationError(
                 f"{recipe} requires exactly one unwatermarked PPL baseline"
             )
+        detection_ids = {
+            detection.identity.value for detection in detections
+        }
         ppl_by_detection: dict[str, ArtifactInterpretation] = {}
+        honest_ppl_by_scheme: dict[str, ArtifactInterpretation] = {}
         for ppl in perplexities:
             if ppl in baseline:
                 continue
             parents = [
                 source.value
                 for source in ppl.direct_source_identities
-                if source.value
-                in {detection.identity.value for detection in detections}
+                if source.value in detection_ids
             ]
+            if not parents:
+                if len(ppl.direct_source_identities) != 1:
+                    raise PlanValidationError(
+                        f"PPL Artifact {ppl.identity.value} must have one "
+                        "direct source"
+                    )
+                source = self.interpretations.artifact(
+                    ppl.direct_source_identities[0]
+                )
+                scheme_identity = ppl.dimensions.scheme_identity
+                if (
+                    source.kind != "generation"
+                    or ppl.dimensions.scheme in {None, "none"}
+                    or scheme_identity is None
+                    or scheme_identity in honest_ppl_by_scheme
+                ):
+                    raise PlanValidationError(
+                        f"PPL Artifact {ppl.identity.value} is not a unique "
+                        "honest-watermarked generation control"
+                    )
+                honest_ppl_by_scheme[scheme_identity] = ppl
+                continue
             if len(parents) != 1 or parents[0] in ppl_by_detection:
                 raise PlanValidationError(
                     f"PPL Artifact {ppl.identity.value} must uniquely pair "
@@ -827,18 +852,20 @@ class ResultAssembler:
                 )
             )
 
-        if baseline:
-            baseline_ppl = baseline[0]
+        for control_ppl in (
+            *honest_ppl_by_scheme.values(),
+            baseline[0],
+        ):
             rows.append(
                 self._row(
                     recipe=recipe,
                     metric="conditional_perplexity",
                     fact=self._one_fact(
-                        baseline_ppl,
+                        control_ppl,
                         "conditional_perplexity",
                         token_axis=False,
                     ),
-                    sources=(baseline_ppl,),
+                    sources=(control_ppl,),
                 )
             )
         return rows

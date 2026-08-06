@@ -974,6 +974,18 @@ def test_adaptive_forgery_and_diversity_recipes(tmp_path):
         NONE,
         5.1,
     )
+    honest_watermarked = generation(
+        tmp_path,
+        "honest_watermarked",
+        VOW,
+    )
+    honest_watermarked_ppl = perplexity(
+        tmp_path,
+        "honest_watermarked_ppl",
+        honest_watermarked,
+        VOW,
+        5.7,
+    )
 
     forgery_rows, _ = assemble_stage(
         tmp_path,
@@ -986,8 +998,17 @@ def test_adaptive_forgery_and_diversity_recipes(tmp_path):
             ppl_k3,
             unwatermarked,
             baseline_ppl,
+            honest_watermarked,
+            honest_watermarked_ppl,
         ),
-        (detected, detected_k3, ppl, ppl_k3, baseline_ppl),
+        (
+            detected,
+            detected_k3,
+            ppl,
+            ppl_k3,
+            baseline_ppl,
+            honest_watermarked_ppl,
+        ),
         recipe="adaptive-forgery",
     )
 
@@ -1009,7 +1030,16 @@ def test_adaptive_forgery_and_diversity_recipes(tmp_path):
     assert sum(
         row["metric"] == "conditional_perplexity"
         for row in forgery_rows
-    ) == 3
+    ) == 4
+    honest_rows = [
+        row
+        for row in forgery_rows
+        if row["metric"] == "conditional_perplexity"
+        and row["dimensions"]["scheme"] == "vow"
+        and row["dimensions"]["generation"]["max_candidates"] is None
+    ]
+    assert len(honest_rows) == 1
+    assert honest_rows[0]["value"] == 5.7
     assert sum(
         row["metric"] == "attack_success_rate"
         for row in forgery_rows

@@ -423,7 +423,12 @@ def test_robustness_plan_is_an_immutable_stage_matrix(monkeypatch):
         "gpt-3.5-turbo-0125": None,
         "gpt-5.6-sol": "low",
     }
-    assert {value["temperature"] for value in paraphrases} == {0.7}
+    assert {
+        value["model"]: value["temperature"] for value in paraphrases
+    } == {
+        "gpt-3.5-turbo-0125": 0.7,
+        "gpt-5.6-sol": None,
+    }
     assert all(
         "implementation_revision" not in value for value in paraphrases
     )

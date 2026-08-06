@@ -182,7 +182,7 @@ stages:
           method: openai-paraphrase
           model: gpt-5.6-luna
           max_output_tokens: 600
-          temperature: 0.7
+          temperature: null
           reasoning_effort: low
           instruction: >-
             Rewrite the supplied text in different wording while preserving

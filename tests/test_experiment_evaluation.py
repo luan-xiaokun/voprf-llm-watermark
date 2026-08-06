@@ -5,11 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from watermark_suite.experiments.adapters import (
     ResolutionContext,
     StageExecutionContext,
 )
+from watermark_suite.experiments.errors import PlanValidationError
 from watermark_suite.experiments.models import (
     ArtifactIdentity,
     ArtifactRef,
@@ -336,7 +338,7 @@ def test_openai_paraphraser_only_sends_reasoning_for_reasoning_models():
         model="gpt-3.5-turbo",
         instruction="rewrite",
         max_output_tokens=600,
-        temperature=None,
+        temperature=0.7,
         reasoning_effort=None,
     )
     sol = paraphraser.paraphrase(
@@ -349,10 +351,83 @@ def test_openai_paraphraser_only_sends_reasoning_for_reasoning_models():
     )
 
     assert "reasoning" not in responses.requests[0]
-    assert "temperature" not in responses.requests[0]
+    assert responses.requests[0]["temperature"] == 0.7
     assert responses.requests[1]["reasoning"] == {"effort": "low"}
+    assert "temperature" not in responses.requests[1]
     assert gpt35.provenance["usage"]["cached_input_tokens"] == 3
     assert sol.provenance["usage"]["reasoning_output_tokens"] == 4
+
+
+@pytest.mark.parametrize(
+    ("model", "temperature", "reasoning_effort", "message"),
+    [
+        (
+            "gpt-3.5-turbo-0125",
+            0.7,
+            "low",
+            "does not support reasoning_effort",
+        ),
+        (
+            "gpt-5.6-luna",
+            0.7,
+            "low",
+            "does not support temperature",
+        ),
+    ],
+)
+def test_robustness_stage_rejects_model_incompatible_openai_parameters(
+    tmp_path,
+    model,
+    temperature,
+    reasoning_effort,
+    message,
+):
+    adapter = RobustnessStageAdapter()
+
+    with pytest.raises(PlanValidationError, match=message):
+        adapter.resolve(
+            {
+                "transformation": {
+                    "method": "openai-paraphrase",
+                    "model": model,
+                    "max_output_tokens": 600,
+                    "temperature": temperature,
+                    "reasoning_effort": reasoning_effort,
+                    "instruction": "rewrite",
+                },
+                "batch_size": 8,
+                "target_field": "generated_text",
+                "seed": 42,
+                "device": "cpu",
+                "dtype": "float32",
+            },
+            resolution_context(tmp_path),
+        )
+
+
+def test_gpt56_temperature_is_allowed_when_reasoning_is_disabled(tmp_path):
+    definition = RobustnessStageAdapter().resolve(
+        {
+            "transformation": {
+                "method": "openai-paraphrase",
+                "model": "gpt-5.6-luna",
+                "max_output_tokens": 600,
+                "temperature": 0.7,
+                "reasoning_effort": "none",
+                "instruction": "rewrite",
+            },
+            "batch_size": 8,
+            "target_field": "generated_text",
+            "seed": 42,
+            "device": "cpu",
+            "dtype": "float32",
+        },
+        resolution_context(tmp_path),
+    )
+
+    transformation = definition.semantic_settings["transformation"]
+    assert transformation["temperature"] == 0.7
+    assert transformation["reasoning_effort"] == "none"
 
 
 def test_robustness_stage_records_openai_response_provenance(

@@ -157,6 +157,21 @@ def _resolve_transformation(
                 + ", ".join(sorted(_REASONING_EFFORTS))
                 + " or null"
             )
+        model = value["model"]
+        if model.startswith("gpt-3.5") and reasoning_effort is not None:
+            raise PlanValidationError(
+                f"openai-paraphrase model {model!r} does not support "
+                "reasoning_effort"
+            )
+        if (
+            model.startswith("gpt-5.6")
+            and temperature is not None
+            and reasoning_effort != "none"
+        ):
+            raise PlanValidationError(
+                f"openai-paraphrase model {model!r} does not support "
+                "temperature unless reasoning_effort is 'none'"
+            )
         if not isinstance(value["instruction"], str) or not value[
             "instruction"
         ].strip():

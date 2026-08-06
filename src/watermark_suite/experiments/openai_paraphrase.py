@@ -88,6 +88,13 @@ class OpenAIParaphraser:
             "APITimeoutError",
         }
 
+    def _wait_before_retry(self, attempts: int) -> None:
+        delay = min(
+            self._initial_retry_delay_seconds * (2 ** (attempts - 1)),
+            30.0,
+        )
+        time.sleep(delay)
+
     def paraphrase(
         self,
         text: str,
@@ -118,7 +125,6 @@ class OpenAIParaphraser:
             attempts += 1
             try:
                 response = self._client.responses.create(**request)
-                break
             except Exception as error:
                 if (
                     attempts >= self._max_attempts
@@ -130,20 +136,30 @@ class OpenAIParaphraser:
                         f"(model={model!r}, "
                         f"sample_id={request_identity!r}): {error}"
                     ) from error
-                delay = min(
-                    self._initial_retry_delay_seconds
-                    * (2 ** (attempts - 1)),
-                    30.0,
-                )
-                time.sleep(delay)
+                self._wait_before_retry(attempts)
+                continue
+            status = _field(response, "status")
+            incomplete_details = _field(response, "incomplete_details", {})
+            incomplete_reason = _field(incomplete_details, "reason")
+            if status == "completed":
+                break
+            if (
+                status == "incomplete"
+                and incomplete_reason == "max_output_tokens"
+                and attempts < self._max_attempts
+            ):
+                self._wait_before_retry(attempts)
+                continue
+            raise RuntimeError(
+                "OpenAI paraphrase response did not complete "
+                f"after {attempts} application attempt(s) "
+                f"(model={model!r}, sample_id={request_identity!r}, "
+                f"id={_field(response, 'id')!r}, status={status!r}, "
+                f"reason={incomplete_reason!r})"
+            )
         assert response is not None
         latency_seconds = time.perf_counter() - started
         status = _field(response, "status")
-        if status != "completed":
-            raise RuntimeError(
-                "OpenAI paraphrase response did not complete "
-                f"(id={_field(response, 'id')!r}, status={status!r})"
-            )
         output_text = _field(response, "output_text", "")
         if not isinstance(output_text, str) or not output_text.strip():
             raise RuntimeError(

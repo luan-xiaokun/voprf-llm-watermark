@@ -178,6 +178,19 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
         if stage.semantic_settings["transformation"]["method"]
         == "openai-paraphrase"
     } == {"gpt-3.5-turbo-0125", "gpt-5.6-luna"}
+    luna_attacks = [
+        stage
+        for stage in plan.stages
+        if stage.kind == "robustness"
+        and stage.semantic_settings["transformation"].get("model")
+        == "gpt-5.6-luna"
+    ]
+    assert len(luna_attacks) == 8
+    assert all(
+        stage.semantic_settings["transformation"]["max_output_tokens"]
+        == 2048
+        for stage in luna_attacks
+    )
 
     report = next(
         stage

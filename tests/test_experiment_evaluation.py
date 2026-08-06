@@ -363,6 +363,88 @@ def test_openai_paraphraser_retries_transient_server_errors():
     assert len(responses.requests) == 4
 
 
+def test_openai_paraphraser_retries_incomplete_token_limited_responses():
+    class EventuallyCompleteResponses(FakeResponses):
+        def create(self, **request):
+            if len(self.requests) < 2:
+                self.requests.append(request)
+                return SimpleNamespace(
+                    id=f"response:{len(self.requests)}",
+                    model=request["model"],
+                    status="incomplete",
+                    incomplete_details=SimpleNamespace(
+                        reason="max_output_tokens"
+                    ),
+                    output_text="",
+                    usage=None,
+                )
+            return super().create(**request)
+
+    responses = EventuallyCompleteResponses()
+    paraphraser = OpenAIParaphraser(
+        SimpleNamespace(responses=responses),
+        max_attempts=3,
+        initial_retry_delay_seconds=0,
+    )
+
+    result = paraphraser.paraphrase(
+        "original",
+        model="gpt-5.6-luna",
+        instruction="rewrite",
+        max_output_tokens=600,
+        temperature=None,
+        reasoning_effort="low",
+        request_identity="sample:1",
+    )
+
+    assert result.text == "rewritten text"
+    assert result.provenance["application_attempts"] == 3
+    assert len(responses.requests) == 3
+
+
+def test_openai_paraphraser_reports_non_retryable_incomplete_reason():
+    class IncompleteResponses:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, **request):
+            self.calls += 1
+            return SimpleNamespace(
+                id="response:1",
+                model=request["model"],
+                status="incomplete",
+                incomplete_details=SimpleNamespace(reason="content_filter"),
+                output_text="",
+                usage=None,
+            )
+
+    responses = IncompleteResponses()
+    paraphraser = OpenAIParaphraser(
+        SimpleNamespace(responses=responses),
+        max_attempts=3,
+        initial_retry_delay_seconds=0,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "model='gpt-5.6-luna'.*sample_id='sample:2'.*"
+            "reason='content_filter'"
+        ),
+    ):
+        paraphraser.paraphrase(
+            "original",
+            model="gpt-5.6-luna",
+            instruction="rewrite",
+            max_output_tokens=600,
+            temperature=None,
+            reasoning_effort="low",
+            request_identity="sample:2",
+        )
+
+    assert responses.calls == 1
+
+
 def test_openai_paraphraser_does_not_retry_bad_requests():
     class InvalidResponses:
         def __init__(self):

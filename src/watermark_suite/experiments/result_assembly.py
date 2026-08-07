@@ -180,7 +180,7 @@ class ResultAssembler:
         *,
         token_axis: bool,
     ) -> tuple[MetricFact, ...]:
-        if artifact.dimensions.scheme != "upv":
+        if artifact.dimensions.detector_scheme != "upv":
             return self._facts(
                 artifact,
                 "detection_rate",

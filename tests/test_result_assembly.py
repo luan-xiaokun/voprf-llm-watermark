@@ -267,18 +267,33 @@ def upv_detection(
     root: Path,
     name: str,
     source: ArtifactRef,
+    *,
+    watermark: dict = UPV,
+    detector_watermark: dict | None = None,
 ) -> ArtifactRef:
+    detector_watermark = detector_watermark or watermark
     operating_point_id = "classifier_confidence>0.5"
     return artifact(
         root,
         name,
         kind="detection",
         schema="watermark-detection-v4",
-        semantic={"watermark": UPV},
+        semantic={
+            "watermark": watermark,
+            "detector_watermark": detector_watermark,
+        },
         sources=(source,),
+        records=[
+            {
+                "sample_id": f"{name}:{index}",
+                "detection": {"confidence": confidence},
+            }
+            for index, confidence in enumerate((0.9, 0.1))
+        ],
         summary={
             "sample_num": 2,
-            "watermark": UPV,
+            "watermark": watermark,
+            "detector_watermark": detector_watermark,
             "detection_operating_points": {
                 operating_point_id: UPV_OPERATING_POINT,
             },
@@ -859,6 +874,81 @@ def test_robustness_report_joins_transformation_detection_and_similarity(
         row["metric"] == "cosine_similarity" and row["value"] == 0.8
         for row in rows
     )
+
+
+def test_robustness_report_selects_upv_classifier_operating_point_for_negative_reference(
+    tmp_path,
+):
+    generated = generation(tmp_path, "upv_generated", UPV)
+    unwatermarked = generation(tmp_path, "upv_unwatermarked", NONE)
+    transformed = artifact(
+        tmp_path,
+        "upv_transformed",
+        kind="robustness",
+        schema="robustness-text-v2",
+        semantic={
+            "model": MODEL,
+            "watermark": UPV,
+            "transformation": {"method": "word-deletion", "rate": 0.1},
+        },
+        sources=(generated,),
+        summary={"sample_num": 2},
+    )
+    robust_detection = upv_detection(
+        tmp_path,
+        "upv_robust_detection",
+        transformed,
+    )
+    negative_detection = upv_detection(
+        tmp_path,
+        "upv_negative_detection",
+        unwatermarked,
+        watermark=NONE,
+        detector_watermark=UPV,
+    )
+    similarity = artifact(
+        tmp_path,
+        "upv_similarity",
+        kind="text-evaluation",
+        schema="text-evaluation-v1",
+        semantic={
+            "metric_set": ["similarity"],
+            "embedding_model": EVAL_MODEL,
+        },
+        sources=(transformed,),
+        summary={
+            "sample_num": 2,
+            "similarity": {
+                "count": 2,
+                "mean": 0.8,
+                "median": 0.8,
+                "std": 0.0,
+                "min": 0.8,
+                "max": 0.8,
+            },
+        },
+    )
+
+    rows, _ = assemble_stage(
+        tmp_path,
+        (
+            generated,
+            unwatermarked,
+            transformed,
+            robust_detection,
+            negative_detection,
+            similarity,
+        ),
+        (robust_detection, negative_detection, similarity),
+        recipe="robustness",
+    )
+
+    assert sorted(row["metric"] for row in rows) == [
+        "cosine_similarity",
+        "false_positive_rate",
+        "roc_auc",
+        "true_positive_rate",
+    ]
 
 
 def test_adaptive_forgery_and_diversity_recipes(tmp_path):

@@ -19,7 +19,7 @@ from .common import require
 class ResultAggregationStageAdapter:
     kind = "result-aggregation"
     revision = (
-        f"result-aggregation-v4+{ARTIFACT_INTERPRETATION_REVISION}"
+        f"result-aggregation-v5+{ARTIFACT_INTERPRETATION_REVISION}"
     )
     accepted_settings = {
         "recipe",

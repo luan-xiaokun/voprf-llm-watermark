@@ -191,6 +191,38 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
         == 2048
         for stage in luna_attacks
     )
+    assert all(
+        stage.semantic_settings["transformation"]["temperature"] == 0.7
+        and stage.semantic_settings["transformation"]["reasoning_effort"]
+        == "none"
+        for stage in luna_attacks
+    )
+    paraphrase_instruction = (
+        "As an expert copy-editor, please rewrite the following text in your "
+        "own voice while ensuring that the final output contains the same "
+        "information as the original text and has roughly the same length. "
+        "Please paraphrase all sentences and do not omit any crucial details. "
+        "Additionally, please take care to provide any relevant information "
+        "about public figures, organizations, or other entities mentioned in "
+        "the text to avoid any potential misunderstandings or biases."
+    )
+    paraphrase_attacks = [
+        stage
+        for stage in plan.stages
+        if stage.kind == "robustness"
+        and stage.semantic_settings["transformation"]["method"]
+        == "openai-paraphrase"
+    ]
+    assert len(paraphrase_attacks) == 16
+    assert all(
+        stage.semantic_settings["transformation"]["max_output_tokens"]
+        == 2048
+        for stage in paraphrase_attacks
+    )
+    assert {
+        stage.semantic_settings["transformation"]["instruction"]
+        for stage in paraphrase_attacks
+    } == {paraphrase_instruction}
 
     report = next(
         stage

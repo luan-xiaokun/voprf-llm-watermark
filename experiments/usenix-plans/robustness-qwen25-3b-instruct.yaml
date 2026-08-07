@@ -172,23 +172,25 @@ stages:
         - &gpt35_attack
           method: openai-paraphrase
           model: gpt-3.5-turbo-0125
-          max_output_tokens: 600
+          max_output_tokens: 2048
           temperature: 0.7
           reasoning_effort: null
-          instruction: >-
-            Rewrite the supplied text in different wording while preserving
-            its information and approximate length. Return only the rewritten
-            text.
+          instruction: &paraphrase_instruction >-
+            As an expert copy-editor, please rewrite the following text in
+            your own voice while ensuring that the final output contains the
+            same information as the original text and has roughly the same
+            length. Please paraphrase all sentences and do not omit any
+            crucial details. Additionally, please take care to provide any
+            relevant information about public figures, organizations, or
+            other entities mentioned in the text to avoid any potential
+            misunderstandings or biases.
         - &luna_attack
           method: openai-paraphrase
           model: gpt-5.6-luna
           max_output_tokens: 2048
-          temperature: null
-          reasoning_effort: low
-          instruction: >-
-            Rewrite the supplied text in different wording while preserving
-            its information and approximate length. Return only the rewritten
-            text.
+          temperature: 0.7
+          reasoning_effort: none
+          instruction: *paraphrase_instruction
 
   transform_rdf_robustness:
     kind: robustness

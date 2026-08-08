@@ -13,7 +13,7 @@ from ..models import ArtifactIdentity, ArtifactRef, JsonObject
 from ..workspace import ExperimentWorkspace
 
 
-ARTIFACT_INTERPRETATION_REVISION = "artifact-interpretation-v3"
+ARTIFACT_INTERPRETATION_REVISION = "artifact-interpretation-v4"
 
 
 class MetricScope(StrEnum):
@@ -337,23 +337,25 @@ class InterpretationSet:
         reader = self._sample_readers[value]
 
         def validated() -> Iterator[MetricFact]:
-            counts: dict[str, int] = {}
-            totals: dict[str, float] = {}
+            counts: dict[tuple[str, int | None], int] = {}
+            totals: dict[tuple[str, int | None], float] = {}
             for fact in reader(
                 self._refs[value],
                 interpretation.dimensions,
                 selected,
             ):
-                counts[fact.metric] = counts.get(fact.metric, 0) + 1
+                key = (fact.metric, fact.dimensions.token_num)
+                counts[key] = counts.get(key, 0) + 1
                 if fact.value is not None:
-                    totals[fact.metric] = (
-                        totals.get(fact.metric, 0.0) + float(fact.value)
+                    totals[key] = (
+                        totals.get(key, 0.0) + float(fact.value)
                     )
                 yield fact
             for aggregate in interpretation.aggregate_facts:
                 if selected is not None and aggregate.metric not in selected:
                     continue
-                sample_count = counts.get(aggregate.metric, 0)
+                key = (aggregate.metric, aggregate.dimensions.token_num)
+                sample_count = counts.get(key, 0)
                 if aggregate.distribution is not None:
                     expected = aggregate.distribution.count
                     if sample_count != expected:
@@ -367,7 +369,7 @@ class InterpretationSet:
                         expected
                         and aggregate.distribution.mean is not None
                         and not math.isclose(
-                            totals[aggregate.metric] / expected,
+                            totals[key] / expected,
                             aggregate.distribution.mean,
                             rel_tol=0.0,
                             abs_tol=1e-12,
@@ -384,7 +386,7 @@ class InterpretationSet:
                     and (
                         sample_count != aggregate.count.sample_num
                         or not math.isclose(
-                            totals.get(aggregate.metric, 0.0),
+                            totals.get(key, 0.0),
                             aggregate.count.positive_num,
                             rel_tol=0.0,
                             abs_tol=1e-12,
@@ -403,8 +405,7 @@ class InterpretationSet:
                         or (
                             sample_count > 0
                             and not math.isclose(
-                                totals.get(aggregate.metric, 0.0)
-                                / sample_count,
+                                totals.get(key, 0.0) / sample_count,
                                 float(aggregate.value),
                                 rel_tol=0.0,
                                 abs_tol=1e-12,

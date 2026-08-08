@@ -994,6 +994,40 @@ def _stream_records(
             ):
                 if detection.get(field) is not None:
                     values.append((metric, detection[field]))
+            milestones = detection.get("milestones") or []
+            score_field = (
+                "step_scores"
+                if dimensions.detector_scheme == "upv"
+                else "step_p_values"
+            )
+            scores = detection.get(score_field) or []
+            if len(milestones) != len(scores):
+                raise ValueError(
+                    f"Detection Sample {sample_id!r} has misaligned "
+                    f"milestones and {score_field}"
+                )
+            if len({int(milestone) for milestone in milestones}) != len(
+                milestones
+            ):
+                raise ValueError(
+                    f"Detection Sample {sample_id!r} has duplicate milestones"
+                )
+            metric = (
+                "classifier_confidence"
+                if dimensions.detector_scheme == "upv"
+                else "p_value"
+            )
+            for milestone, score in zip(milestones, scores):
+                if _selected(metric, selected):
+                    yield _sample_fact(
+                        metric=metric,
+                        value=score,
+                        sample_id=sample_id,
+                        dimensions=dimensions.with_metric_axes(
+                            token_num=int(milestone)
+                        ),
+                        ref=ref,
+                    )
         elif kind == "perplexity":
             quality = record.get("quality", {})
             if "conditional_perplexity" in quality:

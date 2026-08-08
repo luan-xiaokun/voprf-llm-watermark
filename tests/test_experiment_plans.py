@@ -131,7 +131,12 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
     negative_detections = [
         stage
         for stage in plan.stages
-        if stage.stage_name == "detect_unwatermarked"
+        if stage.stage_name
+        in {
+            "detect_unwatermarked",
+            "detect_rdf_unwatermarked",
+            "detect_pdw_unwatermarked",
+        }
     ]
     assert len(negative_detections) == 8
     assert {
@@ -145,13 +150,27 @@ def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
         "pdw",
         "upv",
     }
-    detections = [
-        stage for stage in plan.stages if stage.kind == "detection"
-    ]
-    assert all(
-        stage.semantic_settings["step_size"] is None
+    detections = [stage for stage in plan.stages if stage.kind == "detection"]
+    assert {
+        stage.stage_name: stage.semantic_settings["step_size"]
         for stage in detections
-    )
+        if stage.stage_name
+        in {
+            "detect_robustness",
+            "detect_rdf_robustness",
+            "detect_pdw_robustness",
+            "detect_unwatermarked",
+            "detect_rdf_unwatermarked",
+            "detect_pdw_unwatermarked",
+        }
+    } == {
+        "detect_robustness": 20,
+        "detect_rdf_robustness": 50,
+        "detect_pdw_robustness": None,
+        "detect_unwatermarked": 20,
+        "detect_rdf_unwatermarked": 50,
+        "detect_pdw_unwatermarked": None,
+    }
     assert all(
         stage.semantic_settings["significance_levels"] == [0.01]
         for stage in detections

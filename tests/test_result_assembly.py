@@ -263,6 +263,66 @@ def detection(
     )
 
 
+def add_p_value_milestones(
+    ref: ArtifactRef,
+    values: dict[int, tuple[float, ...]],
+) -> ArtifactRef:
+    records = [
+        json.loads(line)
+        for line in (ref.path / "records.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    milestones = sorted(values)
+    assert all(len(values[token]) == len(records) for token in milestones)
+    for index, record in enumerate(records):
+        record["detection"]["milestones"] = milestones
+        record["detection"]["step_p_values"] = [
+            values[token][index] for token in milestones
+        ]
+    (ref.path / "records.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+    summary = json.loads(
+        (ref.path / "summary.json").read_text(encoding="utf-8")
+    )
+    levels = {
+        identifier: float(operating_point["decision_threshold"])
+        for identifier, operating_point in summary[
+            "detection_operating_points"
+        ].items()
+    }
+    summary["milestone_detection_rate"] = []
+    for token_num in milestones:
+        counts = {
+            identifier: {
+                "positive_num": sum(
+                    value < threshold for value in values[token_num]
+                ),
+                "sample_num": len(records),
+            }
+            for identifier, threshold in levels.items()
+        }
+        summary["milestone_detection_rate"].append(
+            {
+                "token_num": token_num,
+                "eligible_sample_num": len(records),
+                "detection_rate": {
+                    identifier: count["positive_num"] / len(records)
+                    for identifier, count in counts.items()
+                },
+                "detection_counts": counts,
+            }
+        )
+    (ref.path / "summary.json").write_text(
+        json.dumps(summary),
+        encoding="utf-8",
+    )
+    return ref
+
+
 def upv_detection(
     root: Path,
     name: str,
@@ -286,7 +346,11 @@ def upv_detection(
         records=[
             {
                 "sample_id": f"{name}:{index}",
-                "detection": {"confidence": confidence},
+                "detection": {
+                    "confidence": confidence,
+                    "milestones": [100],
+                    "step_scores": [confidence],
+                },
             }
             for index, confidence in enumerate((0.9, 0.1))
         ],
@@ -876,6 +940,109 @@ def test_robustness_report_joins_transformation_detection_and_similarity(
     )
 
 
+def test_robustness_report_emits_tpr_and_auc_at_token_milestones(tmp_path):
+    generated = generation(tmp_path, "curve_generated", VOW)
+    unwatermarked = generation(tmp_path, "curve_unwatermarked", NONE)
+    transformed = artifact(
+        tmp_path,
+        "curve_transformed",
+        kind="robustness",
+        schema="robustness-text-v2",
+        semantic={
+            "model": MODEL,
+            "watermark": VOW,
+            "transformation": {"method": "word-deletion", "rate": 0.1},
+        },
+        sources=(generated,),
+        summary={"sample_num": 2},
+    )
+    robust_detection = add_p_value_milestones(
+        detection(
+            tmp_path,
+            "curve_robust_detection",
+            transformed,
+            token_num=None,
+        ),
+        {
+            50: (0.000001, 0.5),
+            100: (0.0000001, 0.000001),
+        },
+    )
+    negative_detection = add_p_value_milestones(
+        detection(
+            tmp_path,
+            "curve_negative_detection",
+            unwatermarked,
+            watermark=NONE,
+            detector_watermark=VOW,
+            positive=0,
+            token_num=None,
+        ),
+        {
+            50: (0.1, 0.3),
+            100: (0.2, 0.4),
+        },
+    )
+    similarity = artifact(
+        tmp_path,
+        "curve_similarity",
+        kind="text-evaluation",
+        schema="text-evaluation-v1",
+        semantic={
+            "metric_set": ["similarity"],
+            "embedding_model": EVAL_MODEL,
+        },
+        sources=(transformed,),
+        summary={
+            "sample_num": 2,
+            "similarity": {
+                "count": 2,
+                "mean": 0.8,
+                "median": 0.8,
+                "std": 0.0,
+                "min": 0.8,
+                "max": 0.8,
+            },
+        },
+    )
+
+    rows, _ = assemble_stage(
+        tmp_path,
+        (
+            generated,
+            unwatermarked,
+            transformed,
+            robust_detection,
+            negative_detection,
+            similarity,
+        ),
+        (robust_detection, negative_detection, similarity),
+        recipe="robustness",
+    )
+
+    curve_rows = [
+        row
+        for row in rows
+        if row["dimensions"]["token_num"] is not None
+    ]
+    assert sorted(
+        (
+            row["metric"],
+            row["dimensions"]["token_num"],
+            row["value"],
+            row["population"]["sample_num"],
+        )
+        for row in curve_rows
+    ) == [
+        ("false_positive_rate", 50, 0.0, 2),
+        ("false_positive_rate", 100, 0.0, 2),
+        ("roc_auc", 50, 0.5, 4),
+        ("roc_auc", 100, 1.0, 4),
+        ("true_positive_rate", 50, 0.5, 2),
+        ("true_positive_rate", 100, 1.0, 2),
+    ]
+
+
 def test_robustness_report_selects_upv_classifier_operating_point_for_negative_reference(
     tmp_path,
 ):
@@ -946,9 +1113,18 @@ def test_robustness_report_selects_upv_classifier_operating_point_for_negative_r
     assert sorted(row["metric"] for row in rows) == [
         "cosine_similarity",
         "false_positive_rate",
+        "false_positive_rate",
+        "roc_auc",
         "roc_auc",
         "true_positive_rate",
+        "true_positive_rate",
     ]
+    assert {
+        row["dimensions"]["token_num"]
+        for row in rows
+        if row["metric"]
+        in {"false_positive_rate", "roc_auc", "true_positive_rate"}
+    } == {None, 100}
 
 
 def test_adaptive_forgery_and_diversity_recipes(tmp_path):

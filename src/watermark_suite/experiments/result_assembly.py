@@ -538,15 +538,20 @@ class ResultAssembler:
         transformed_detections: dict[str, ArtifactInterpretation] = {}
         for artifact in detections:
             detector_identity = artifact.dimensions.detector_scheme_identity
-            facts = self._detection_facts(
+            scalar_facts = self._detection_facts(
                 artifact,
-                token_axis=not auc_enabled,
+                token_axis=False,
             )
-            if not facts:
+            token_facts = self._detection_facts(
+                artifact,
+                token_axis=True,
+            )
+            if not scalar_facts:
                 raise PlanValidationError(
                     f"Artifact {artifact.identity.value} has no selected "
                     "detection fact at its selected operating point"
                 )
+            facts = scalar_facts + token_facts
             if artifact.dimensions.scheme == "none":
                 rows.extend(
                     self._row(
@@ -579,34 +584,61 @@ class ResultAssembler:
                             f"Detector {detector_identity} has no "
                             "unwatermarked reference Artifact"
                         )
-                    positive_scores = self._robustness_scores(artifact)
-                    negative_scores = self._robustness_scores(negative)
-                    auc_fact = MetricFact(
-                        metric="roc_auc",
-                        scope=MetricScope.AGGREGATE,
-                        value=self._roc_auc(
-                            positive_scores,
-                            negative_scores,
-                        ),
-                        dimensions=replace(
-                            artifact.dimensions,
-                            token_num=None,
-                            target_fpr=None,
-                            detection_operating_point=None,
-                        ),
-                        source_artifact=artifact.identity,
-                        count=ExactCount(
-                            len(positive_scores) + len(negative_scores)
-                        ),
+                    positive_scores = self._robustness_scores_by_token(
+                        artifact
                     )
-                    rows.append(
-                        self._row(
-                            recipe=recipe,
+                    negative_scores = self._robustness_scores_by_token(
+                        negative
+                    )
+                    self._validate_robustness_score_curve(
+                        artifact,
+                        facts,
+                        positive_scores,
+                    )
+                    negative_facts = (
+                        self._detection_facts(negative, token_axis=False)
+                        + self._detection_facts(negative, token_axis=True)
+                    )
+                    self._validate_robustness_score_curve(
+                        negative,
+                        negative_facts,
+                        negative_scores,
+                    )
+                    for token_num in sorted(
+                        set(positive_scores) & set(negative_scores),
+                        key=lambda value: (
+                            value is not None,
+                            value if value is not None else -1,
+                        ),
+                    ):
+                        positive_values = positive_scores[token_num]
+                        negative_values = negative_scores[token_num]
+                        auc_fact = MetricFact(
                             metric="roc_auc",
-                            fact=auc_fact,
-                            sources=(artifact, negative),
+                            scope=MetricScope.AGGREGATE,
+                            value=self._roc_auc(
+                                positive_values,
+                                negative_values,
+                            ),
+                            dimensions=replace(
+                                artifact.dimensions,
+                                token_num=token_num,
+                                target_fpr=None,
+                                detection_operating_point=None,
+                            ),
+                            source_artifact=artifact.identity,
+                            count=ExactCount(
+                                len(positive_values) + len(negative_values)
+                            ),
                         )
-                    )
+                        rows.append(
+                            self._row(
+                                recipe=recipe,
+                                metric="roc_auc",
+                                fact=auc_fact,
+                                sources=(artifact, negative),
+                            )
+                        )
             if artifact.dimensions.detector_scheme_identity != (
                 artifact.dimensions.scheme_identity
             ):
@@ -653,27 +685,53 @@ class ResultAssembler:
             )
         return rows
 
-    def _robustness_scores(
+    def _robustness_scores_by_token(
         self,
         artifact: ArtifactInterpretation,
-    ) -> list[float]:
+    ) -> dict[int | None, list[float]]:
         confidence = artifact.dimensions.detector_scheme == "upv"
         metric = "classifier_confidence" if confidence else "p_value"
         facts = self.interpretations.stream_sample_facts(
             artifact.identity,
             metrics=(metric,),
         )
-        values = [
-            float(fact.value)
-            for fact in facts
-            if fact.metric == metric and fact.value is not None
-        ]
-        if len(values) != artifact.record_count:
-            raise PlanValidationError(
-                f"Artifact {artifact.identity.value} provides {len(values)} "
-                f"{metric} scores for {artifact.record_count} records"
+        result: dict[int | None, list[float]] = {}
+        for fact in facts:
+            if fact.metric != metric or fact.value is None:
+                continue
+            value = float(fact.value)
+            result.setdefault(fact.dimensions.token_num, []).append(
+                value if confidence else -value
             )
-        return values if confidence else [-value for value in values]
+        final_values = result.get(None, [])
+        if len(final_values) != artifact.record_count:
+            raise PlanValidationError(
+                f"Artifact {artifact.identity.value} provides "
+                f"{len(final_values)} final {metric} scores for "
+                f"{artifact.record_count} records"
+            )
+        return result
+
+    @staticmethod
+    def _validate_robustness_score_curve(
+        artifact: ArtifactInterpretation,
+        facts: tuple[MetricFact, ...],
+        scores: dict[int | None, list[float]],
+    ) -> None:
+        fact_counts = {
+            fact.dimensions.token_num: fact.count.sample_num
+            for fact in facts
+            if fact.count is not None
+        }
+        score_counts = {
+            token_num: len(values) for token_num, values in scores.items()
+        }
+        if fact_counts != score_counts:
+            raise PlanValidationError(
+                f"Artifact {artifact.identity.value} milestone detection "
+                f"counts disagree with Sample scores: facts={fact_counts}, "
+                f"scores={score_counts}"
+            )
 
     def _adaptive_forgery(
         self,

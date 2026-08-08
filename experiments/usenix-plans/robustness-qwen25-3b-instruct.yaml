@@ -228,7 +228,8 @@ stages:
     token_num: null
     significance_levels: [0.01]
     use_local: true
-    step_size: null
+    # Preserve prefix scores for the TPR/AUC-versus-token curves.
+    step_size: 20
 
   detect_rdf_robustness:
     kind: detection
@@ -238,7 +239,9 @@ stages:
     token_num: null
     significance_levels: [0.01]
     use_local: true
-    step_size: null
+    # RDF reruns its permutation test at every milestone, so use a coarser
+    # grid than the Green-Red and classifier-based detectors.
+    step_size: 50
 
   detect_pdw_robustness:
     kind: detection
@@ -250,7 +253,9 @@ stages:
     use_local: true
     step_size: null
 
-  # Detector overrides let every scheme score the same negative texts.
+  # Detector overrides let every scheme score the same negative texts. RDF
+  # is separate because its incremental permutation test uses a coarser grid;
+  # PDW remains scalar because its signature detector has no prefix score.
   detect_unwatermarked:
     kind: detection
     input: generate_unwatermarked
@@ -259,7 +264,7 @@ stages:
     token_num: null
     significance_levels: [0.01]
     use_local: true
-    step_size: null
+    step_size: 20
     sweep:
       detector_watermark:
         - *vow_h1
@@ -267,9 +272,29 @@ stages:
         - *vow_h4
         - *lefthash
         - *selfhash
-        - *rdf
-        - *pdw
         - *upv
+
+  detect_rdf_unwatermarked:
+    kind: detection
+    input: generate_unwatermarked
+    batch_size: 16
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: 50
+    detector_watermark: *rdf
+
+  detect_pdw_unwatermarked:
+    kind: detection
+    input: generate_unwatermarked
+    batch_size: 16
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.01]
+    use_local: true
+    step_size: null
+    detector_watermark: *pdw
 
   evaluate_robustness_similarity:
     kind: text-evaluation
@@ -314,6 +339,8 @@ stages:
       - detect_rdf_robustness
       - detect_pdw_robustness
       - detect_unwatermarked
+      - detect_rdf_unwatermarked
+      - detect_pdw_unwatermarked
       - evaluate_robustness_similarity
       - evaluate_rdf_robustness_similarity
       - evaluate_pdw_robustness_similarity

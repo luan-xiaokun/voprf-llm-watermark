@@ -258,6 +258,8 @@ def test_normalizes_lineage_facts_relations_and_streams_samples(tmp_path):
                 "p_value": 0.1,
                 "green_token_num": 50,
                 "effective_token_num": 100,
+                "milestones": [100],
+                "step_p_values": [0.1],
             },
         },
         {
@@ -266,6 +268,8 @@ def test_normalizes_lineage_facts_relations_and_streams_samples(tmp_path):
                 "p_value": 0.2,
                 "green_token_num": 45,
                 "effective_token_num": 100,
+                "milestones": [100],
+                "step_p_values": [0.2],
             },
         },
     ]
@@ -291,7 +295,9 @@ def test_normalizes_lineage_facts_relations_and_streams_samples(tmp_path):
     )
     assert iter(stream) is stream
     facts = list(stream)
-    assert [fact.value for fact in facts] == [0.1, 0.2]
+    assert [
+        (fact.dimensions.token_num, fact.value) for fact in facts
+    ] == [(100, 0.1), (None, 0.1), (100, 0.2), (None, 0.2)]
     assert all(fact.scope == MetricScope.SAMPLE for fact in facts)
     assert all(fact.metric == "p_value" for fact in facts)
 

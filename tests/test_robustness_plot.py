@@ -133,11 +133,27 @@ def test_robustness_plot_requires_complete_token_curves(tmp_path):
 def test_robustness_plot_renders_lines_not_bars(tmp_path, monkeypatch):
     from matplotlib.axes import Axes
 
+    plotted_x_values = []
+    inset_axes = []
+    original_plot = Axes.plot
+    original_inset_axes = Axes.inset_axes
+
     def reject_bar(*args, **kwargs):
         del args, kwargs
         raise AssertionError("robustness curves must not use bars")
 
+    def track_plot(axis, *args, **kwargs):
+        plotted_x_values.append(tuple(args[0]))
+        return original_plot(axis, *args, **kwargs)
+
+    def track_inset(axis, *args, **kwargs):
+        inset = original_inset_axes(axis, *args, **kwargs)
+        inset_axes.append(inset)
+        return inset
+
     monkeypatch.setattr(Axes, "bar", reject_bar)
+    monkeypatch.setattr(Axes, "plot", track_plot)
+    monkeypatch.setattr(Axes, "inset_axes", track_inset)
     report_path = _write_report(tmp_path / "artifact_report")
     output = tmp_path / "figures" / "robustness.pdf"
 
@@ -145,3 +161,7 @@ def test_robustness_plot_renders_lines_not_bars(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert output.stat().st_size > 0
+    assert len(plotted_x_values) == 56
+    assert all(0 not in values for values in plotted_x_values)
+    assert len(inset_axes) == 2
+    assert all(inset.get_ylim() == (0.0, 0.35) for inset in inset_axes)

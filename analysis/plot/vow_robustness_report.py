@@ -42,6 +42,16 @@ SCHEME_STYLES = {
     "UPV": ("#CC79A7", (0, (1.5, 1.5))),
 }
 
+SCHEME_MARKERS = {
+    "VOW ($h=1$)": "o",
+    "VOW ($h=2$)": "s",
+    "VOW ($h=4$)": "^",
+    "LeftHash": "D",
+    "SelfHash": "v",
+    "RDF": "P",
+    "UPV": "X",
+}
+
 ATTACKS = (
     ("synonym", "Synonym Replacement"),
     ("gpt-3.5-turbo-0125", "Paraphrase (GPT-3.5 Turbo)"),
@@ -49,9 +59,11 @@ ATTACKS = (
 )
 
 METRICS = (
-    ("roc_auc", "AUC", (0.38, 1.02), 0.5),
-    ("true_positive_rate", "True Positive Rate", (0.0, 1.02), 0.0),
+    ("roc_auc", "AUC", (0.38, 1.02)),
+    ("true_positive_rate", "True Positive Rate", (0.0, 1.02)),
 )
+
+TPR_ZOOM_LIMITS = (0.0, 0.35)
 
 STYLE = {
     "pdf.fonttype": 42,
@@ -127,7 +139,7 @@ def robustness_curves(
     if not 0.0 <= min_eligible_fraction <= 1.0:
         raise ValueError("min_eligible_fraction must be between zero and one")
 
-    selected_metrics = {metric for metric, _, _, _ in METRICS}
+    selected_metrics = {metric for metric, _, _ in METRICS}
     grouped: dict[tuple[str, str, str], list[CurvePoint]] = {}
     seen: set[tuple[str, str, str, int]] = set()
     for row in report.records:
@@ -183,7 +195,7 @@ def robustness_curves(
         (scheme, attack, metric)
         for scheme in SCHEME_ORDER
         for attack, _ in ATTACKS
-        for metric, _, _, _ in METRICS
+        for metric, _, _ in METRICS
     }
     missing = sorted(expected - set(grouped))
     unexpected = sorted(set(grouped) - expected)
@@ -221,6 +233,60 @@ def _style_subplot_frame(axis: Any) -> None:
     axis.tick_params(width=0.4, length=2.5)
 
 
+def _plot_scheme_curve(
+    axis: Any,
+    *,
+    scheme: str,
+    points: tuple[CurvePoint, ...],
+    label: str | None,
+    linewidth: float = 0.75,
+) -> None:
+    color, linestyle = SCHEME_STYLES[scheme]
+    axis.plot(
+        [point.token_num for point in points],
+        [point.value for point in points],
+        label=label,
+        color=color,
+        linestyle=linestyle,
+        linewidth=linewidth,
+        marker=SCHEME_MARKERS[scheme],
+        markersize=1.7,
+        markerfacecolor="white",
+        markeredgewidth=0.35,
+        markevery=3,
+    )
+
+
+def _add_tpr_zoom(
+    axis: Any,
+    *,
+    curves: dict[tuple[str, str, str], tuple[CurvePoint, ...]],
+    attack: str,
+    maximum_token_num: int,
+) -> None:
+    inset = axis.inset_axes((0.38, 0.35, 0.59, 0.54))
+    for scheme in SCHEME_ORDER:
+        _plot_scheme_curve(
+            inset,
+            scheme=scheme,
+            points=curves[(scheme, attack, "true_positive_rate")],
+            label=None,
+            linewidth=0.65,
+        )
+    inset.set_xlim(0, maximum_token_num)
+    inset.set_ylim(*TPR_ZOOM_LIMITS)
+    inset.set_yticks((0.0, 0.1, 0.2, 0.3))
+    inset.set_title("Zoomed TPR", fontsize=5.5, pad=0.8)
+    inset.grid(
+        which="major",
+        linestyle=":",
+        alpha=0.45,
+        linewidth=0.4,
+    )
+    _style_subplot_frame(inset)
+    inset.tick_params(labelsize=5, width=0.35, length=1.8, pad=1.0)
+
+
 def render_robustness(
     report: ReportArtifact,
     output: Path,
@@ -237,7 +303,7 @@ def render_robustness(
         figure, axes = plt.subplots(
             2,
             3,
-            figsize=(6.8, 2.4),
+            figsize=(6.8, 2.8),
             sharex=True,
             sharey="row",
             layout="constrained",
@@ -253,23 +319,15 @@ def render_robustness(
                 fontsize=6,
                 fontweight="bold",
             )
-            for row_index, (
-                metric,
-                ylabel,
-                limits,
-                origin,
-            ) in enumerate(METRICS):
+            for row_index, (metric, ylabel, limits) in enumerate(METRICS):
                 axis = axes[row_index][column]
                 for scheme in SCHEME_ORDER:
                     points = curves[(scheme, attack, metric)]
-                    color, linestyle = SCHEME_STYLES[scheme]
-                    axis.plot(
-                        [0, *(point.token_num for point in points)],
-                        [origin, *(point.value for point in points)],
+                    _plot_scheme_curve(
+                        axis,
+                        scheme=scheme,
+                        points=points,
                         label=scheme,
-                        color=color,
-                        linestyle=linestyle,
-                        linewidth=0.75,
                     )
                 axis.set_ylim(*limits)
                 axis.set_xlim(0, maximum_token_num)
@@ -282,6 +340,13 @@ def render_robustness(
                 _style_subplot_frame(axis)
                 if column == 0:
                     axis.set_ylabel(ylabel)
+            if column > 0:
+                _add_tpr_zoom(
+                    axes[1][column],
+                    curves=curves,
+                    attack=attack,
+                    maximum_token_num=maximum_token_num,
+                )
 
         handles, labels = axes[0][0].get_legend_handles_labels()
         figure.suptitle(" ")

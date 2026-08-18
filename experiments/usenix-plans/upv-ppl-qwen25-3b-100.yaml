@@ -1,0 +1,60 @@
+version: 1
+name: upv-ppl-qwen25-3b-100
+
+models:
+  qwen-generation:
+    checkpoint: Qwen/Qwen2.5-3B
+  qwen-ppl:
+    checkpoint: Qwen/Qwen2.5-7B
+
+datasets:
+  c4-evaluation:
+    kind: c4
+    format: jsonl
+    path: data/c4_realnewslike_subset_1000.jsonl
+    split: train
+    prompt_field: prompt_text
+    sample_id_field: original_index
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+  repetitions: 1
+
+stages:
+  # Match the generation policy used by the first performance experiment:
+  # 100 C4 prompts and unrestricted multinomial sampling at temperature 0.7.
+  generate_upv:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 100
+    batch_size: 32
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: false
+    stop_strings: null
+    watermark:
+      method: upv
+      enabled: true
+      detector_dir: experiments/upv_baseline/model
+      calibration_path: experiments/upv_baseline/private_detector_calibration.json
+      window_size: 4
+      gamma: 0.5
+      delta: 2.0
+      bit_number: 18
+      layers: 5
+      beam_size: 0
+
+  evaluate_upv_ppl:
+    kind: perplexity
+    input: generate_upv
+    model: qwen-ppl
+    batch_size: 8
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text

@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import os
 import platform
+import shutil
 import socket
 import sys
 import time
 import traceback
 from collections.abc import Iterable, Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 from .adapters import (
@@ -69,6 +72,20 @@ def _write_chunk(path: Path, result: WorkResult) -> None:
     os.replace(temporary, path)
 
 
+def _safe_artifact_path(value: str) -> PurePosixPath:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or path.is_absolute()
+        or ".." in path.parts
+        or any(part in {"", "."} for part in path.parts)
+    ):
+        raise ArtifactFinalizationError(
+            f"WorkResult file has unsafe Artifact path {value!r}"
+        )
+    return path
+
+
 def _read_jsonlines(path: Path) -> Iterable[JsonObject]:
     with path.open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, start=1):
@@ -93,6 +110,9 @@ def _attempt_provenance(stage: PreparedStage) -> JsonObject:
         "dtype": stage.execution_settings.get("dtype"),
         "execution_revision": stage.adapter_revision,
     }
+    resume_compatibility = stage.execution_settings.get("resume_compatibility")
+    if resume_compatibility:
+        compatibility["resume_compatibility"] = resume_compatibility
     try:
         import torch
 
@@ -287,7 +307,90 @@ class ExperimentRuns:
                     f"Attempt {attempt.value} chunk {path} has "
                     f"{actual_count} records, expected {chunk['record_count']}"
                 )
+            for artifact_path, file_info in chunk.get("files", {}).items():
+                _safe_artifact_path(artifact_path)
+                if not isinstance(file_info, dict):
+                    raise CheckpointCorruptionError(
+                        f"Attempt {attempt.value} contains invalid file metadata"
+                    )
+                relative_path = file_info.get("checkpoint_path")
+                expected_digest = file_info.get("sha256")
+                if not isinstance(relative_path, str) or not isinstance(
+                    expected_digest, str
+                ):
+                    raise CheckpointCorruptionError(
+                        f"Attempt {attempt.value} contains invalid file metadata"
+                    )
+                file_path = self.workspace.root / relative_path
+                if (
+                    not file_path.is_file()
+                    or sha256_file(file_path) != expected_digest
+                ):
+                    raise CheckpointCorruptionError(
+                        f"Attempt {attempt.value} has a corrupt file {file_path}"
+                    )
         return chunks
+
+    def _checkpoint_result(
+        self,
+        *,
+        attempt: AttemptIdentity,
+        item: Any,
+        result: WorkResult,
+    ) -> None:
+        chunk_stem = f"{item.ordinal:08d}-{item.identity}"
+        chunk_path = (
+            self.workspace.attempt_directory(attempt)
+            / "chunks"
+            / f"{chunk_stem}.jsonl"
+        )
+        _write_chunk(chunk_path, result)
+        checkpoint_files: JsonObject = {}
+        file_root = (
+            self.workspace.attempt_directory(attempt)
+            / "chunk-files"
+            / chunk_stem
+        )
+        seen_paths: set[str] = set()
+        attempt_directory = self.workspace.attempt_directory(attempt).resolve()
+        for produced in result.files:
+            logical = str(_safe_artifact_path(produced.artifact_path))
+            if logical in seen_paths:
+                raise ArtifactFinalizationError(
+                    f"WorkItem {item.identity!r} emitted duplicate file {logical!r}"
+                )
+            seen_paths.add(logical)
+            source = produced.source_path.resolve()
+            if not source.is_file():
+                raise ArtifactFinalizationError(
+                    f"WorkItem {item.identity!r} did not produce {source}"
+                )
+            try:
+                source.relative_to(attempt_directory)
+            except ValueError as error:
+                raise ArtifactFinalizationError(
+                    f"WorkItem {item.identity!r} produced a file outside its "
+                    f"Attempt directory: {source}"
+                ) from error
+            destination = file_root / logical
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(destination.suffix + ".tmp")
+            os.replace(source, temporary)
+            with temporary.open("rb") as copied:
+                os.fsync(copied.fileno())
+            os.replace(temporary, destination)
+            checkpoint_files[logical] = {
+                "checkpoint_path": str(destination.relative_to(self.workspace.root)),
+                "sha256": sha256_file(destination),
+            }
+        self.workspace.commit_checkpoint(
+            attempt=attempt,
+            work_identity=item.identity,
+            ordinal=item.ordinal,
+            chunk_path=chunk_path,
+            record_count=len(result.records),
+            files=checkpoint_files,
+        )
 
     def _finalize(
         self,
@@ -339,6 +442,20 @@ class ExperimentRuns:
             os.fsync(output.fileno())
         os.replace(temporary_records, records_path)
 
+        attached_digests: dict[str, str] = {}
+        for chunk in chunks:
+            for artifact_path, file_info in chunk.get("files", {}).items():
+                if artifact_path in attached_digests:
+                    raise ArtifactFinalizationError(
+                        f"{stage.instance_name} emitted duplicate Artifact file "
+                        f"{artifact_path!r}"
+                    )
+                source = self.workspace.root / file_info["checkpoint_path"]
+                destination = draft / str(_safe_artifact_path(artifact_path))
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+                attached_digests[artifact_path] = sha256_file(destination)
+
         records = tuple(_read_jsonlines(records_path))
         summary = execution.summarize(records)
         summary_path = draft / "summary.json"
@@ -346,6 +463,7 @@ class ExperimentRuns:
         content_digests = {
             "records.jsonl": sha256_file(records_path),
             "summary.json": sha256_file(summary_path),
+            **attached_digests,
         }
         identity_document = {
             "identity_schema": 1,
@@ -496,20 +614,33 @@ class ExperimentRuns:
             execution = adapter.prepare(execution_context)
             completed = self.workspace.completed_work(attempt)
             self._validate_checkpoints(attempt)
-            work_items = tuple(execution.work_items())
-            work_ids = [item.identity for item in work_items]
-            if len(work_ids) != len(set(work_ids)):
-                raise StageExecutionError(
-                    "stage emitted duplicate work identities",
-                    stage=stage.instance_name,
-                    run_identity=run.value,
-                    attempt_identity=attempt.value,
-                )
-            for item in work_items:
-                if item.identity in completed:
-                    continue
+            seen_work: set[str] = set()
+            seen_ordinals: set[int] = set()
+
+            def pending_items() -> Iterable[Any]:
+                for item in execution.work_items():
+                    if item.identity in seen_work:
+                        raise StageExecutionError(
+                            "stage emitted duplicate work identities",
+                            stage=stage.instance_name,
+                            run_identity=run.value,
+                            attempt_identity=attempt.value,
+                        )
+                    if item.ordinal in seen_ordinals:
+                        raise StageExecutionError(
+                            "stage emitted duplicate work ordinals",
+                            stage=stage.instance_name,
+                            run_identity=run.value,
+                            attempt_identity=attempt.value,
+                        )
+                    seen_work.add(item.identity)
+                    seen_ordinals.add(item.ordinal)
+                    if item.identity not in completed:
+                        yield item
+
+            def execute_item(item: Any) -> WorkResult:
                 try:
-                    result = execution.execute(item)
+                    return execution.execute(item)
                 except Exception as error:
                     raise StageExecutionError(
                         str(error),
@@ -518,19 +649,60 @@ class ExperimentRuns:
                         attempt_identity=attempt.value,
                         work_identity=item.identity,
                     ) from error
-                chunk_path = (
-                    self.workspace.attempt_directory(attempt)
-                    / "chunks"
-                    / f"{item.ordinal:08d}-{item.identity}.jsonl"
+
+            worker_count = int(
+                definition.execution_settings.get("worker_count", 1)
+            )
+            max_in_flight = int(
+                definition.execution_settings.get(
+                    "max_in_flight", max(1, worker_count * 2)
                 )
-                _write_chunk(chunk_path, result)
-                self.workspace.commit_checkpoint(
-                    attempt=attempt,
-                    work_identity=item.identity,
-                    ordinal=item.ordinal,
-                    chunk_path=chunk_path,
-                    record_count=len(result.records),
+            )
+            if worker_count <= 0 or max_in_flight < worker_count:
+                raise StageExecutionError(
+                    "worker_count must be positive and max_in_flight must "
+                    "be at least worker_count",
+                    stage=stage.instance_name,
+                    run_identity=run.value,
+                    attempt_identity=attempt.value,
                 )
+            items = iter(pending_items())
+            if worker_count == 1:
+                for item in items:
+                    self._checkpoint_result(
+                        attempt=attempt,
+                        item=item,
+                        result=execute_item(item),
+                    )
+            else:
+                executor = ThreadPoolExecutor(max_workers=worker_count)
+                futures: dict[Future[WorkResult], Any] = {}
+                exhausted = False
+                try:
+                    while futures or not exhausted:
+                        while not exhausted and len(futures) < max_in_flight:
+                            try:
+                                item = next(items)
+                            except StopIteration:
+                                exhausted = True
+                                break
+                            futures[executor.submit(execute_item, item)] = item
+                        if not futures:
+                            continue
+                        finished, _ = wait(
+                            tuple(futures), return_when=FIRST_COMPLETED
+                        )
+                        for future in finished:
+                            item = futures.pop(future)
+                            self._checkpoint_result(
+                                attempt=attempt,
+                                item=item,
+                                result=future.result(),
+                            )
+                finally:
+                    for future in futures:
+                        future.cancel()
+                    executor.shutdown(wait=True, cancel_futures=True)
             artifact = self._finalize(
                 plan=plan,
                 stage=stage,

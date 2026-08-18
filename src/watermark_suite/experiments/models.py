@@ -123,6 +123,15 @@ class WorkItem:
 class WorkResult:
     records: tuple[JsonObject, ...]
     metrics: JsonObject = field(default_factory=dict)
+    files: tuple["WorkFile", ...] = ()
+
+
+@dataclass(frozen=True)
+class WorkFile:
+    """An Attempt-local file transferred into the finalized Artifact."""
+
+    source_path: Path
+    artifact_path: str
 
 
 @dataclass(frozen=True)

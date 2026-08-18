@@ -119,6 +119,7 @@ class ExperimentWorkspace:
                     chunk_path TEXT NOT NULL,
                     chunk_sha256 TEXT NOT NULL,
                     record_count INTEGER NOT NULL,
+                    files_json TEXT NOT NULL DEFAULT '{}',
                     committed_at TEXT NOT NULL,
                     PRIMARY KEY (attempt_identity, work_identity),
                     FOREIGN KEY (attempt_identity)
@@ -144,6 +145,17 @@ class ExperimentWorkspace:
                     ON plan_runs(plan_digest, instance_name);
                 """
             )
+            checkpoint_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(checkpoints)"
+                ).fetchall()
+            }
+            if "files_json" not in checkpoint_columns:
+                connection.execute(
+                    "ALTER TABLE checkpoints ADD COLUMN "
+                    "files_json TEXT NOT NULL DEFAULT '{}'"
+                )
 
     def register_plan(self, plan: ResolvedExperimentPlan) -> Path:
         serialized = json.dumps(plan.to_dict(), ensure_ascii=False, sort_keys=True)
@@ -587,6 +599,7 @@ class ExperimentWorkspace:
         ordinal: int,
         chunk_path: Path,
         record_count: int,
+        files: JsonObject | None = None,
     ) -> None:
         relative_path = chunk_path.relative_to(self.root)
         digest = sha256_file(chunk_path)
@@ -596,8 +609,8 @@ class ExperimentWorkspace:
                     """
                     INSERT INTO checkpoints
                         (attempt_identity, work_identity, ordinal, chunk_path,
-                         chunk_sha256, record_count, committed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                         chunk_sha256, record_count, files_json, committed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         attempt.value,
@@ -606,6 +619,9 @@ class ExperimentWorkspace:
                         str(relative_path),
                         digest,
                         record_count,
+                        json.dumps(
+                            files or {}, ensure_ascii=False, sort_keys=True
+                        ),
                         _now(),
                     ),
                 )
@@ -625,7 +641,12 @@ class ExperimentWorkspace:
                 """,
                 (attempt.value,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            value = dict(row)
+            value["files"] = json.loads(value.pop("files_json", "{}"))
+            result.append(value)
+        return result
 
     def artifact_for_attempt(
         self, attempt: AttemptIdentity

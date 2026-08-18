@@ -2,6 +2,7 @@
 
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 
@@ -22,12 +23,16 @@ from .optimized_mersenne import MersenneRNG as mersenne_rng  # type: ignore
 from .levenshtein import levenshtein  # type: ignore
 
 # from .optimized_levenshtein import detect_cython  # type: ignore
-from .levenshtein_c_wrapper import detect_c as detect_cython
+from .levenshtein_c_wrapper import (
+    detect_c as detect_cython,
+    set_num_threads as set_omp_num_threads,
+)
 
 
 @dataclass
 class RDFDetectionResult(DetectionResult):
-    pass
+    permutation_exceedance_count: int | None = None
+    permutation_run_num: int | None = None
 
 
 @dataclass
@@ -124,6 +129,46 @@ def permutation_test(tokens, key, n, k, vocab_size, n_runs=100):
     return (p_val + 1.0) / (n_runs + 1.0)
 
 
+def permutation_test_compact(
+    tokens: list[int],
+    *,
+    keyed_xi: np.ndarray,
+    n: int,
+    n_runs: int,
+    rng: np.random.Generator,
+    intraop_threads: int,
+) -> tuple[float, int]:
+    """Exact RDF Monte Carlo test retaining only token columns that are read."""
+
+    if detect_cython is None:
+        raise RuntimeError("RDF optimized Levenshtein library is unavailable")
+    if not tokens:
+        raise ValueError("RDF detection requires at least one token")
+    if intraop_threads <= 0:
+        raise ValueError("intraop_threads must be positive")
+    if set_omp_num_threads is not None:
+        set_omp_num_threads(intraop_threads)
+
+    token_array = np.asarray(tokens, dtype=np.int64)
+    unique_tokens, remapped = np.unique(token_array, return_inverse=True)
+    if unique_tokens[-1] >= keyed_xi.shape[1] or unique_tokens[0] < 0:
+        raise ValueError("RDF token id is outside the tokenizer vocabulary")
+    keyed_subset = np.ascontiguousarray(
+        keyed_xi[:, unique_tokens], dtype=np.float32
+    )
+    remapped = np.ascontiguousarray(remapped, dtype=np.int64)
+    token_num = len(tokens)
+    observed = detect_cython(remapped, n, token_num, keyed_subset)
+
+    exceedance_count = 0
+    shape = (n, len(unique_tokens))
+    for _ in range(n_runs):
+        alternative = rng.random(shape).astype(np.float32)
+        null_result = detect_cython(remapped, n, token_num, alternative)
+        exceedance_count += null_result <= observed
+    return (exceedance_count + 1.0) / (n_runs + 1.0), exceedance_count
+
+
 class RDFDetector(WatermarkDetector):
     def __init__(
         self,
@@ -136,6 +181,63 @@ class RDFDetector(WatermarkDetector):
         self.length = length
         self.seed = seed
         self.n_runs = n_runs
+        self._keyed_xi: np.ndarray | None = None
+        self._keyed_xi_lock = threading.Lock()
+
+    def _keyed_matrix(self) -> np.ndarray:
+        if self._keyed_xi is not None:
+            return self._keyed_xi
+        with self._keyed_xi_lock:
+            if self._keyed_xi is not None:
+                return self._keyed_xi
+            vocab_size = len(self.tokenizer.get_vocab())
+            rng = mersenne_rng(self.seed)
+            count = self.length * vocab_size
+            if hasattr(rng, "random_array"):
+                values = rng.random_array(count)
+            else:
+                values = np.fromiter(
+                    (rng.rand() for _ in range(count)),
+                    dtype=np.float32,
+                    count=count,
+                )
+            matrix = np.asarray(values, dtype=np.float32).reshape(
+                self.length, vocab_size
+            )
+            matrix.flags.writeable = False
+            self._keyed_xi = matrix
+            return matrix
+
+    def prepare_token_detection(self) -> None:
+        """Materialize immutable keyed state before concurrent scoring."""
+
+        self._keyed_matrix()
+
+    def detect_token_ids(
+        self,
+        token_ids: list[int],
+        *,
+        sample_seed: int,
+        n_runs: int | None = None,
+        intraop_threads: int = 1,
+    ) -> RDFDetectionResult:
+        selected_runs = self.n_runs if n_runs is None else n_runs
+        if selected_runs <= 0:
+            raise ValueError("n_runs must be positive")
+        p_value, exceedance_count = permutation_test_compact(
+            token_ids,
+            keyed_xi=self._keyed_matrix(),
+            n=self.length,
+            n_runs=selected_runs,
+            rng=np.random.default_rng(sample_seed),
+            intraop_threads=intraop_threads,
+        )
+        return RDFDetectionResult(
+            total_token_num=len(token_ids),
+            p_value=p_value,
+            permutation_exceedance_count=exceedance_count,
+            permutation_run_num=selected_runs,
+        )
 
     def detect(
         self,

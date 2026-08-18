@@ -10,6 +10,7 @@ from ..artifact_interpretation import (
     interpret_artifacts,
 )
 from ..errors import PlanValidationError
+from ..fpr_calibration import FprCalibrationAssembler
 from ..identity import identity_for
 from ..models import ArtifactRef, JsonObject, WorkItem, WorkResult
 from ..result_assembly import REPORT_RECIPES, ResultAssembler
@@ -19,14 +20,15 @@ from .common import require
 class ResultAggregationStageAdapter:
     kind = "result-aggregation"
     revision = (
-        f"result-aggregation-v5+{ARTIFACT_INTERPRETATION_REVISION}"
+        f"result-aggregation-v6+{ARTIFACT_INTERPRETATION_REVISION}"
     )
     accepted_settings = {
         "recipe",
         "confidence_level",
         "threshold_policy",
+        "significance_levels",
     }
-    _required = accepted_settings
+    _required = {"recipe", "confidence_level"}
 
     def resolve(
         self,
@@ -48,27 +50,59 @@ class ResultAggregationStageAdapter:
             raise PlanValidationError(
                 "confidence_level must be between zero and one"
             )
-        policy = settings["threshold_policy"]
-        if (
-            not isinstance(policy, dict)
-            or "default" not in policy
-            or any(
-                not isinstance(name, str)
-                or not isinstance(value, (int, float))
-                or not 0 < float(value) < 1
-                for name, value in policy.items()
+        policy = settings.get("threshold_policy")
+        significance_levels = settings.get("significance_levels")
+        if recipe == "fpr-calibration":
+            if (
+                not isinstance(significance_levels, list)
+                or not significance_levels
+                or any(
+                    not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or not 0 < float(value) < 1
+                    for value in significance_levels
+                )
+            ):
+                raise PlanValidationError(
+                    "fpr-calibration requires significance_levels between zero and one"
+                )
+            if policy is not None:
+                raise PlanValidationError(
+                    "fpr-calibration does not use threshold_policy"
+                )
+            resolved_policy = {}
+            resolved_levels = sorted(
+                {float(value) for value in significance_levels},
+                reverse=True,
             )
-        ):
-            raise PlanValidationError(
-                "threshold_policy must map scheme names to thresholds "
-                "between zero and one and include default"
-            )
+        else:
+            if (
+                not isinstance(policy, dict)
+                or "default" not in policy
+                or any(
+                    not isinstance(name, str)
+                    or not isinstance(value, (int, float))
+                    or not 0 < float(value) < 1
+                    for name, value in policy.items()
+                )
+            ):
+                raise PlanValidationError(
+                    "threshold_policy must map scheme names to thresholds "
+                    "between zero and one and include default"
+                )
+            if significance_levels is not None:
+                raise PlanValidationError(
+                    "significance_levels is only valid for fpr-calibration"
+                )
+            resolved_policy = {
+                name: float(value) for name, value in policy.items()
+            }
+            resolved_levels = []
         semantic = {
             "recipe": recipe,
             "confidence_level": float(confidence),
-            "threshold_policy": {
-                name: float(value) for name, value in policy.items()
-            },
+            "threshold_policy": resolved_policy,
+            "significance_levels": resolved_levels,
         }
         return ResolvedStageDefinition(
             settings=dict(settings),
@@ -127,6 +161,12 @@ class _ResultAggregationExecution:
 
     def _assemble(self) -> tuple[list[JsonObject], JsonObject]:
         semantic = self.context.semantic_settings
+        if semantic["recipe"] == "fpr-calibration":
+            return FprCalibrationAssembler(
+                self.context.inputs,
+                significance_levels=semantic["significance_levels"],
+                confidence_level=semantic["confidence_level"],
+            ).assemble()
         interpretations = interpret_artifacts(
             self.context.workspace,
             self.context.inputs,

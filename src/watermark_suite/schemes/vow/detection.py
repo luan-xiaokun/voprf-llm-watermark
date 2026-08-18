@@ -99,15 +99,36 @@ class VOWDetector(WatermarkDetector):
         token_num: int | None = None,
         step_size: int | None = None,
     ) -> list[VOWDetectionResult]:
+        token_ids_list = [
+            self.tokenizer.encode(text, add_special_tokens=False) for text in texts
+        ]
+        return self.local_batch_detect_tokens(
+            token_ids_list,
+            gamma=gamma,
+            window_size=window_size,
+            include_p_values_per_token=include_p_values_per_token,
+            return_green_token_mask=return_green_token_mask,
+            token_num=token_num,
+            step_size=step_size,
+        )
+
+    def local_batch_detect_tokens(
+        self,
+        token_ids_list: list[list[int]],
+        gamma: float | None = None,
+        window_size: int | None = None,
+        include_p_values_per_token: bool = False,
+        return_green_token_mask: bool = False,
+        token_num: int | None = None,
+        step_size: int | None = None,
+    ) -> list[VOWDetectionResult]:
         gamma = gamma or self.gamma
         window_size = window_size or self.window_size
 
         if step_size is not None and step_size > 0:
             include_p_values_per_token = True
 
-        token_ids_list = [
-            self.tokenizer.encode(text, add_special_tokens=False) for text in texts
-        ]
+        token_ids_list = [list(ids) for ids in token_ids_list]
         if token_num is not None:
             token_ids_list = [ids[:token_num] for ids in token_ids_list]
 

@@ -1,4 +1,6 @@
 import cython
+import numpy as np
+cimport numpy as cnp
 
 cdef class MersenneRNG:
     cdef unsigned int state[624]
@@ -54,6 +56,16 @@ cdef class MersenneRNG:
 
     cpdef double rand(self):
         return self.randint() * (1.0 / 4294967296.0)
+
+    cpdef object random_array(self, Py_ssize_t count):
+        cdef cnp.ndarray[cnp.float32_t, ndim=1] values
+        cdef Py_ssize_t index
+        if count < 0:
+            raise ValueError("count must be non-negative")
+        values = np.empty(count, dtype=np.float32)
+        for index in range(count):
+            values[index] = self.randint() * (1.0 / 4294967296.0)
+        return values
 
     def randperm(self, int n):
         cdef int i, j

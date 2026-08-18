@@ -74,6 +74,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
             "unicode"
         ],  # or also: ["unicode", "homoglyphs", "truecase"]
         ignore_repeated_ngrams: bool = True,
+        cache_ngram_scores: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -95,6 +96,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
                 normalization_strategy_lookup(normalization_strategy)
             )
         self.ignore_repeated_ngrams = ignore_repeated_ngrams
+        self.cache_ngram_scores = cache_ngram_scores
 
     def dummy_detect(
         self,
@@ -171,6 +173,14 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
 
         return bool(self._get_ngram_score_cached(prefix, target))
 
+    def _get_ngram_score(self, prefix: tuple[int, ...], target: int) -> bool:
+        if self.cache_ngram_scores:
+            return self._get_ngram_score_cached(prefix, target)
+        greenlist_ids = self._get_greenlist_ids(
+            torch.as_tensor(prefix, device=self.device)
+        )
+        return bool(target in greenlist_ids)
+
     def _score_ngrams_in_passage(self, input_ids: torch.Tensor):
         """Core function to gather all ngrams in the input and compute their watermark."""
         if len(input_ids) - self.context_width < 1:
@@ -190,7 +200,7 @@ class KGWDetector(WatermarkBase, WatermarkDetector):
         for idx, ngram_example in enumerate(frequencies_table.keys()):
             prefix = ngram_example if self.self_salt else ngram_example[:-1]
             target = ngram_example[-1]
-            ngram_to_watermark_lookup[ngram_example] = self._get_ngram_score_cached(
+            ngram_to_watermark_lookup[ngram_example] = self._get_ngram_score(
                 prefix, target
             )
 

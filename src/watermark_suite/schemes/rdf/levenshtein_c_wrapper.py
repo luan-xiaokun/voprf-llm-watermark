@@ -22,6 +22,19 @@ try:
         ctypes.c_float,  # gamma
     ]
     _lib.detect_c.restype = ctypes.c_float
+    try:
+        _omp_set_num_threads = _lib.omp_set_num_threads
+    except AttributeError:
+        _omp_set_num_threads = None
+    if _omp_set_num_threads is not None:
+        _omp_set_num_threads.argtypes = [ctypes.c_int]
+        _omp_set_num_threads.restype = None
+
+    def set_num_threads(value):
+        if value <= 0:
+            raise ValueError("OpenMP thread count must be positive")
+        if _omp_set_num_threads is not None:
+            _omp_set_num_threads(value)
 
     def detect_c(tokens, n, k, xi, gamma=0.0):
         # Ensure correct types
@@ -46,6 +59,8 @@ try:
 except OSError as e:
     print(f"Warning: Could not load optimized_levenshtein_c.so: {e}", file=sys.stderr)
     detect_c = None
+    set_num_threads = None
 except Exception as e:
     print(f"Warning: Error loading C library: {e}", file=sys.stderr)
     detect_c = None
+    set_num_threads = None

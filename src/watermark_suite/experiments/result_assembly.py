@@ -27,6 +27,7 @@ REPORT_RECIPES = frozenset(
         "robustness",
         "adaptive-forgery",
         "diversity",
+        "fpr-calibration",
     }
 )
 

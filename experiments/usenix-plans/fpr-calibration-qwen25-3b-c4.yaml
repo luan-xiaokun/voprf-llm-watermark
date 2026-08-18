@@ -19,13 +19,13 @@ stages:
     kind: token-window-corpus
     dataset: c4-null-stream
     tokenizer: qwen-tokenizer
-    sample_num: 100000
+    sample_num: 1000000
     window_token_num: 200
     max_windows_per_document: 1
     selection_seed: 42
     shuffle_buffer_size: 10000
     stream_batch_size: 512
-    checkpoint_sample_num: 4096
+    checkpoint_sample_num: 8192
 
   detect_vow_null:
     kind: null-detection
@@ -38,8 +38,8 @@ stages:
       delta: 2.5
       server_seed_path: data/server_seed
       naive_baseline: false
-    sample_num: 100000
-    detector_batch_size: 256
+    sample_num: 1000000
+    detector_batch_size: 2048
     concurrent_batches: 4
     max_in_flight_batches: 8
     intraop_threads: 1
@@ -54,13 +54,13 @@ stages:
       enabled: true
       gamma: 0.25
       delta: 2.0
-    sample_num: 100000
-    detector_batch_size: 8
+    sample_num: 1000000
+    detector_batch_size: 256
     concurrent_batches: 4
     max_in_flight_batches: 8
     intraop_threads: 1
     significance_levels: [0.01, 0.001, 0.0001, 0.00001]
-    device: cuda
+    device: cuda:0
 
   detect_selfhash_null:
     kind: null-detection
@@ -70,13 +70,13 @@ stages:
       enabled: true
       gamma: 0.25
       delta: 2.0
-    sample_num: 100000
-    detector_batch_size: 8
+    sample_num: 1000000
+    detector_batch_size: 256
     concurrent_batches: 4
     max_in_flight_batches: 8
     intraop_threads: 1
     significance_levels: [0.01, 0.001, 0.0001, 0.00001]
-    device: cuda
+    device: cuda:0
 
   detect_rdf_null:
     kind: null-detection
@@ -88,10 +88,10 @@ stages:
       seed: 42
       watermark_device: cpu
       n_runs: 100
-    sample_num: 10000
-    detector_batch_size: 1
-    concurrent_batches: 8
-    max_in_flight_batches: 16
+    sample_num: 100000
+    detector_batch_size: 32
+    concurrent_batches: 10
+    max_in_flight_batches: 20
     intraop_threads: 4
     significance_levels: [0.01]
     device: cpu

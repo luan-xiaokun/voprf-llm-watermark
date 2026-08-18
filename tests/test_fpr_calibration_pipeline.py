@@ -245,6 +245,14 @@ def test_streamed_token_windows_feed_concurrent_detector_batches(
         "positive_num": 3,
         "sample_num": 6,
     }
+    assert detection_summary["retention"]["sample_p_values_retained"] is True
+    detection_records = [
+        json.loads(line)
+        for line in (detection.path / "records.jsonl").read_text().splitlines()
+    ]
+    assert len(detection_records) == 6
+    assert all("p_value" in record["detection"] for record in detection_records)
+    assert all(record["source_token_sha256"] for record in detection_records)
     assembled = runs.workspace.artifact(ArtifactIdentity(artifacts["assemble"]))
     row = json.loads(
         (assembled.path / "records.jsonl").read_text(encoding="utf-8")
@@ -376,7 +384,7 @@ def test_fpr_assembler_marks_unattainable_rdf_level_unsupported(tmp_path):
     assert "minimum attainable" in by_alpha[0.001]["reason"]
 
 
-def test_usenix_fpr_plan_uses_200_token_streaming_windows():
+def test_usenix_fpr_plan_uses_large_200_token_streaming_population():
     plan = yaml.safe_load(
         Path(
             "experiments/usenix-plans/fpr-calibration-qwen25-3b-c4.yaml"
@@ -385,7 +393,24 @@ def test_usenix_fpr_plan_uses_200_token_streaming_windows():
 
     dataset = plan["datasets"]["c4-null-stream"]
     corpus = plan["stages"]["build_c4_null_windows"]
+    vow = plan["stages"]["detect_vow_null"]
+    lefthash = plan["stages"]["detect_lefthash_null"]
+    selfhash = plan["stages"]["detect_selfhash_null"]
+    rdf = plan["stages"]["detect_rdf_null"]
     assert dataset["kind"] == "huggingface-stream"
     assert len(dataset["revision"]) == 40
-    assert corpus["sample_num"] == 100000
+    assert corpus["sample_num"] == 1000000
     assert corpus["window_token_num"] == 200
+    assert vow["sample_num"] == 1000000
+    assert vow["detector_batch_size"] == 2048
+    assert lefthash["sample_num"] == 1000000
+    assert lefthash["detector_batch_size"] == 256
+    assert lefthash["concurrent_batches"] == 4
+    assert selfhash["sample_num"] == 1000000
+    assert selfhash["detector_batch_size"] == 256
+    assert selfhash["concurrent_batches"] == 4
+    assert rdf["sample_num"] == 100000
+    assert rdf["detector_batch_size"] == 32
+    assert rdf["concurrent_batches"] == 10
+    assert rdf["intraop_threads"] == 4
+    assert rdf["significance_levels"] == [0.01]

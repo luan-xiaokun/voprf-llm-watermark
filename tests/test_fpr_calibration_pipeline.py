@@ -398,7 +398,8 @@ def test_usenix_fpr_plan_uses_large_200_token_streaming_population():
     selfhash = plan["stages"]["detect_selfhash_null"]
     rdf = plan["stages"]["detect_rdf_null"]
     assert dataset["kind"] == "huggingface-stream"
-    assert len(dataset["revision"]) == 40
+    assert dataset["config"] == "realnewslike"
+    assert dataset["revision"] == "1588ec454efa1a09f29cd18ddd04fe05fc8653a2"
     assert corpus["sample_num"] == 1000000
     assert corpus["window_token_num"] == 200
     assert vow["sample_num"] == 1000000

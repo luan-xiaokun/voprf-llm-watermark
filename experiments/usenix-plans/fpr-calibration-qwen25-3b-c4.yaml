@@ -11,7 +11,7 @@ datasets:
     path: allenai/c4
     config: realnewslike
     split: train
-    revision: 31d802a4fbffd491ef18bd1c332868a5f955a2d2
+    revision: 1588ec454efa1a09f29cd18ddd04fe05fc8653a2
     text_field: text
 
 stages:

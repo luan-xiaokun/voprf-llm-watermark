@@ -102,6 +102,120 @@ def resolve(name: str, monkeypatch):
     return resolve_path(PLAN_DIRECTORY / name, monkeypatch)
 
 
+def test_usenix_vow_h2_parameter_grid_plan_contract(monkeypatch):
+    plan = resolve_path(
+        USENIX_PLAN_DIRECTORY
+        / "vow-h2-parameter-grid-qwen25-3b-1000.yaml",
+        monkeypatch,
+    )
+
+    expected_grid = {
+        (gamma, delta)
+        for gamma in (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875)
+        for delta in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+    }
+    generations = [
+        stage for stage in plan.stages if stage.kind == "generation"
+    ]
+    watermarked = [
+        stage
+        for stage in generations
+        if stage.semantic_settings["watermark"]["method"] == "vow"
+    ]
+    baselines = [
+        stage
+        for stage in generations
+        if stage.semantic_settings["watermark"]["method"] == "none"
+    ]
+
+    assert len(plan.stages) == 150
+    assert len(generations) == 50
+    assert len(watermarked) == 49
+    assert len(baselines) == 1
+    assert all(
+        stage.semantic_settings["model"]["checkpoint"]
+        == "Qwen/Qwen2.5-3B"
+        for stage in generations
+    )
+    assert all(
+        stage.semantic_settings["batch_size"] == 64
+        for stage in generations
+    )
+    assert all(
+        stage.semantic_settings["prompt_population"]["dataset"][
+            "selection"
+        ]["count"]
+        == 1000
+        for stage in generations
+    )
+    assert all(
+        stage.semantic_settings["watermark"]["window_size"] == 2
+        for stage in watermarked
+    )
+
+    assert {
+        (
+            stage.semantic_settings["watermark"]["gamma"],
+            stage.semantic_settings["watermark"]["delta"],
+        )
+        for stage in watermarked
+    } == expected_grid
+    assert all(
+        stage.semantic_settings["generation"]
+        == {
+            "max_new_tokens": 210,
+            "do_sample": True,
+            "top_p": None,
+            "top_k": None,
+            "temperature": 0.7,
+            "suppress_eos": True,
+            "stop_strings": None,
+        }
+        for stage in watermarked
+    )
+
+    detections = [
+        stage for stage in plan.stages if stage.kind == "detection"
+    ]
+    assert len(detections) == 49
+    assert all(
+        stage.semantic_settings["significance_levels"] == [0.00001]
+        and stage.semantic_settings["step_size"] is None
+        for stage in detections
+    )
+
+    perplexities = [
+        stage for stage in plan.stages if stage.kind == "perplexity"
+    ]
+    assert len(perplexities) == 50
+    assert all(
+        stage.semantic_settings["model"]["checkpoint"]
+        == "Qwen/Qwen2.5-7B"
+        for stage in perplexities
+    )
+    assert all(
+        stage.semantic_settings["batch_size"] == 16
+        for stage in perplexities
+    )
+
+    reports = [
+        stage
+        for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    ]
+    assert len(reports) == 1
+    assert all(len(stage.input_instances) == 99 for stage in reports)
+    assert all(
+        stage.semantic_settings == {
+            "recipe": "tpr-vs-ppl",
+            "confidence_level": 0.95,
+            "threshold_policy": {"default": 0.00001},
+            "significance_levels": [],
+        }
+        for stage in reports
+    )
+
+
 def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
     plan = resolve_path(
         USENIX_PLAN_DIRECTORY / "robustness-qwen25-3b-instruct.yaml",

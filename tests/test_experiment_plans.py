@@ -216,6 +216,203 @@ def test_usenix_vow_h2_parameter_grid_plan_contract(monkeypatch):
     )
 
 
+def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
+    plan = resolve_path(
+        USENIX_PLAN_DIRECTORY
+        / "vow-h2-fpr-token-top50-qwen25-3b-1000.yaml",
+        monkeypatch,
+    )
+    multinomial_grid = resolve_path(
+        USENIX_PLAN_DIRECTORY
+        / "vow-h2-parameter-grid-qwen25-3b-1000.yaml",
+        monkeypatch,
+    )
+    existing_fpr = resolve_path(
+        USENIX_PLAN_DIRECTORY / "fpr-calibration-qwen25-3b-c4.yaml",
+        monkeypatch,
+    )
+
+    assert len(plan.stages) == 156
+    null_corpus = next(
+        stage
+        for stage in plan.stages
+        if stage.kind == "token-window-corpus"
+    )
+    assert null_corpus.semantic_settings["sample_num"] == 1_000_000
+    assert null_corpus.semantic_settings["window"] == {
+        "token_num": 200,
+        "max_per_document": 1,
+        "stride": 200,
+        "drop_incomplete": True,
+    }
+    existing_null_corpus = next(
+        stage
+        for stage in existing_fpr.stages
+        if stage.kind == "token-window-corpus"
+    )
+    assert (
+        null_corpus.semantic_settings
+        == existing_null_corpus.semantic_settings
+    )
+
+    null_detection = next(
+        stage for stage in plan.stages if stage.kind == "null-detection"
+    )
+    assert null_detection.semantic_settings["sample_num"] == 1_000_000
+    assert null_detection.semantic_settings["significance_levels"] == [
+        0.01,
+        0.001,
+        0.0001,
+        0.00001,
+    ]
+    assert null_detection.semantic_settings["detector_watermark"][
+        "window_size"
+    ] == 2
+
+    token_generation = next(
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "generate_vow_h2_multinomial_default"
+    )
+    assert token_generation.semantic_settings["batch_size"] == 64
+    assert token_generation.semantic_settings["generation"] == {
+        "max_new_tokens": 210,
+        "do_sample": True,
+        "top_p": None,
+        "top_k": None,
+        "temperature": 0.7,
+        "suppress_eos": True,
+        "stop_strings": None,
+    }
+    assert token_generation.semantic_settings["watermark"] == {
+        "method": "vow",
+        "enabled": True,
+        "window_size": 2,
+        "gamma": 0.5,
+        "delta": 2.5,
+        "server_seed_path": token_generation.semantic_settings[
+            "watermark"
+        ]["server_seed_path"],
+        "server_seed_sha256": token_generation.semantic_settings[
+            "watermark"
+        ]["server_seed_sha256"],
+        "naive_baseline": False,
+    }
+    existing_default_generation = next(
+        stage
+        for stage in multinomial_grid.stages
+        if stage.stage_name == "generate_vow_multinomial"
+        and stage.semantic_settings["watermark"]["gamma"] == 0.5
+        and stage.semantic_settings["watermark"]["delta"] == 2.5
+    )
+    assert (
+        token_generation.semantic_settings
+        == existing_default_generation.semantic_settings
+    )
+    token_detection = next(
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "detect_vow_h2_token_length"
+    )
+    assert token_detection.semantic_settings["step_size"] == 5
+    assert token_detection.semantic_settings["significance_levels"] == [
+        0.00001
+    ]
+
+    top50_generations = [
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "generate_vow_h2_top50_grid"
+    ]
+    assert len(top50_generations) == 49
+    assert {
+        (
+            stage.semantic_settings["watermark"]["gamma"],
+            stage.semantic_settings["watermark"]["delta"],
+        )
+        for stage in top50_generations
+    } == {
+        (gamma, delta)
+        for gamma in (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875)
+        for delta in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0)
+    }
+    assert all(
+        stage.semantic_settings["batch_size"] == 32
+        and stage.semantic_settings["model"]["checkpoint"]
+        == "Qwen/Qwen2.5-3B"
+        and stage.semantic_settings["prompt_population"]["dataset"]
+        ["selection"]["count"]
+        == 1000
+        and stage.semantic_settings["watermark"]["window_size"] == 2
+        and stage.semantic_settings["generation"]
+        == {
+            "max_new_tokens": 210,
+            "do_sample": True,
+            "top_p": 0.9,
+            "top_k": 50,
+            "temperature": 0.7,
+            "suppress_eos": True,
+            "stop_strings": None,
+        }
+        for stage in top50_generations
+    )
+
+    top50_baseline = next(
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "generate_unwatermarked_top50"
+    )
+    assert top50_baseline.semantic_settings["batch_size"] == 32
+    assert top50_baseline.semantic_settings["watermark"]["method"] == "none"
+    top50_detections = [
+        stage
+        for stage in plan.stages
+        if stage.stage_name == "detect_vow_h2_top50_grid"
+    ]
+    assert len(top50_detections) == 49
+    assert all(
+        stage.semantic_settings["significance_levels"] == [0.00001]
+        and stage.semantic_settings["step_size"] is None
+        for stage in top50_detections
+    )
+    top50_ppl = [
+        stage
+        for stage in plan.stages
+        if stage.stage_name
+        in {
+            "evaluate_vow_h2_top50_ppl",
+            "evaluate_unwatermarked_top50_ppl",
+        }
+    ]
+    assert len(top50_ppl) == 50
+    assert all(
+        stage.semantic_settings["batch_size"] == 16
+        and stage.semantic_settings["model"]["checkpoint"]
+        == "Qwen/Qwen2.5-7B"
+        for stage in top50_ppl
+    )
+
+    reports = {
+        stage.stage_name: stage
+        for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    }
+    assert set(reports) == {
+        "assemble_vow_h2_fpr_calibration",
+        "assemble_vow_h2_tpr_vs_token_length",
+        "assemble_vow_h2_top50_tpr_vs_ppl",
+    }
+    assert len(
+        reports["assemble_vow_h2_fpr_calibration"].input_instances
+    ) == 1
+    assert len(
+        reports["assemble_vow_h2_tpr_vs_token_length"].input_instances
+    ) == 1
+    assert len(
+        reports["assemble_vow_h2_top50_tpr_vs_ppl"].input_instances
+    ) == 99
+
+
 def test_usenix_vow_h2_downstream_plan_contract(monkeypatch):
     plan = resolve_path(
         USENIX_PLAN_DIRECTORY

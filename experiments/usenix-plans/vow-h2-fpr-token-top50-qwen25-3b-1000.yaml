@@ -1,0 +1,237 @@
+version: 1
+name: vow-h2-fpr-token-top50-qwen25-3b-1000
+
+models:
+  qwen-tokenizer:
+    checkpoint: Qwen/Qwen2.5-3B
+  qwen-generation:
+    checkpoint: Qwen/Qwen2.5-3B
+  qwen-ppl:
+    checkpoint: Qwen/Qwen2.5-7B
+
+datasets:
+  c4-null-stream:
+    kind: huggingface-stream
+    path: allenai/c4
+    config: realnewslike
+    split: train
+    revision: 1588ec454efa1a09f29cd18ddd04fe05fc8653a2
+    text_field: text
+  c4-evaluation:
+    kind: c4
+    format: jsonl
+    path: data/c4_realnewslike_subset_1000.jsonl
+    split: train
+    prompt_field: prompt_text
+    sample_id_field: original_index
+
+defaults:
+  device: cuda
+  dtype: bfloat16
+  repetitions: 1
+
+stages:
+  # Reuses the million-window corpus from the existing FPR Plan when both
+  # Plans use the same workspace. Only the h=2 VOW detector is new.
+  build_c4_null_windows:
+    kind: token-window-corpus
+    dataset: c4-null-stream
+    tokenizer: qwen-tokenizer
+    sample_num: 1000000
+    window_token_num: 200
+    max_windows_per_document: 1
+    selection_seed: 42
+    shuffle_buffer_size: 10000
+    stream_batch_size: 512
+    checkpoint_sample_num: 8192
+
+  detect_vow_h2_null:
+    kind: null-detection
+    input: build_c4_null_windows
+    detector_watermark: &vow_h2_default
+      method: vow
+      enabled: true
+      window_size: 2
+      gamma: 0.5
+      delta: 2.5
+      server_seed_path: data/server_seed
+      naive_baseline: false
+    sample_num: 1000000
+    detector_batch_size: 2048
+    concurrent_batches: 4
+    max_in_flight_batches: 8
+    intraop_threads: 1
+    significance_levels: [0.01, 0.001, 0.0001, 0.00001]
+    device: cpu
+
+  assemble_vow_h2_fpr_calibration:
+    kind: result-aggregation
+    inputs:
+      - detect_vow_h2_null
+    recipe: fpr-calibration
+    significance_levels: [0.01, 0.001, 0.0001, 0.00001]
+    confidence_level: 0.95
+
+  # These semantics exactly match the (gamma=0.5, delta=2.5) generation in
+  # the completed multinomial h=2 grid, allowing its Artifact to be reused.
+  generate_vow_h2_multinomial_default:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 64
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: null
+    top_k: null
+    temperature: 0.7
+    suppress_eos: true
+    stop_strings: null
+    watermark:
+      <<: *vow_h2_default
+
+  detect_vow_h2_token_length:
+    kind: detection
+    input: generate_vow_h2_multinomial_default
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: 5
+
+  assemble_vow_h2_tpr_vs_token_length:
+    kind: result-aggregation
+    inputs:
+      - detect_vow_h2_token_length
+    recipe: tpr-vs-token-length
+    confidence_level: 0.95
+    threshold_policy:
+      default: 0.00001
+
+  # Full h=2 grid for top-50 sampling with nucleus filtering. Generation is
+  # kept at batch 32 because the adaptive top-k sampler has more host-side
+  # work per decoding step than the default multinomial sampler.
+  generate_vow_h2_top50_grid:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 32
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: 0.9
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: true
+    stop_strings: null
+    sweep:
+      watermark:
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.125, delta: 4.0}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.25, delta: 4.0}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.375, delta: 4.0}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.5, delta: 4.0}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.625, delta: 4.0}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.75, delta: 4.0}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 1.0}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 1.5}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 2.0}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 2.5}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 3.0}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 3.5}
+        - {<<: *vow_h2_default, gamma: 0.875, delta: 4.0}
+
+  generate_unwatermarked_top50:
+    kind: generation
+    model: qwen-generation
+    dataset: c4-evaluation
+    num_samples: 1000
+    batch_size: 32
+    seed: 42
+    max_new_tokens: 210
+    do_sample: true
+    top_p: 0.9
+    top_k: 50
+    temperature: 0.7
+    suppress_eos: true
+    stop_strings: null
+    watermark:
+      method: none
+      enabled: false
+
+  detect_vow_h2_top50_grid:
+    kind: detection
+    input: generate_vow_h2_top50_grid
+    batch_size: 64
+    target_field: generated_text
+    token_num: null
+    significance_levels: [0.00001]
+    use_local: true
+    step_size: null
+
+  evaluate_vow_h2_top50_ppl:
+    kind: perplexity
+    input: detect_vow_h2_top50_grid
+    model: qwen-ppl
+    batch_size: 16
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text
+
+  evaluate_unwatermarked_top50_ppl:
+    kind: perplexity
+    input: generate_unwatermarked_top50
+    model: qwen-ppl
+    batch_size: 16
+    max_length: 2048
+    prompt_field: prompt_text
+    target_field: generated_text
+
+  assemble_vow_h2_top50_tpr_vs_ppl:
+    kind: result-aggregation
+    inputs:
+      - detect_vow_h2_top50_grid
+      - evaluate_vow_h2_top50_ppl
+      - evaluate_unwatermarked_top50_ppl
+    recipe: tpr-vs-ppl
+    confidence_level: 0.95
+    threshold_policy:
+      default: 0.00001

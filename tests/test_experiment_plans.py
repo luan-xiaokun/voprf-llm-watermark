@@ -216,6 +216,85 @@ def test_usenix_vow_h2_parameter_grid_plan_contract(monkeypatch):
     )
 
 
+def test_usenix_vow_h2_downstream_plan_contract(monkeypatch):
+    plan = resolve_path(
+        USENIX_PLAN_DIRECTORY
+        / "vow-h2-downstream-qwen25-3b-instruct.yaml",
+        monkeypatch,
+    )
+
+    assert len(plan.stages) == 5
+    downstream = [
+        stage for stage in plan.stages if stage.kind == "downstream"
+    ]
+    assert len(downstream) == 4
+    assert all(
+        stage.semantic_settings["model"]["checkpoint"]
+        == "Qwen/Qwen2.5-3B-Instruct"
+        for stage in downstream
+    )
+    assert all(
+        stage.semantic_settings["batch_size"] == 32
+        and stage.semantic_settings["max_new_tokens"] == 1024
+        and stage.semantic_settings["decoding"]
+        == {"do_sample": False, "num_beams": 1}
+        for stage in downstream
+    )
+    assert all(
+        stage.semantic_settings["watermark"]["method"] == "vow"
+        and stage.semantic_settings["watermark"]["window_size"] == 2
+        and stage.semantic_settings["watermark"]["gamma"] == 0.5
+        for stage in downstream
+    )
+    assert {
+        stage.semantic_settings["watermark"]["delta"]
+        for stage in downstream
+    } == {2.0, 2.5}
+
+    gsm8k = [
+        stage
+        for stage in downstream
+        if stage.semantic_settings["task"] == "gsm8k"
+    ]
+    humaneval = [
+        stage
+        for stage in downstream
+        if stage.semantic_settings["task"] == "humaneval"
+    ]
+    assert len(gsm8k) == len(humaneval) == 2
+    assert all(
+        stage.semantic_settings["prompt_population"]["dataset"]
+        ["selection"]["count"]
+        == 1319
+        and stage.semantic_settings["prompt_population"]["prompt_policy"]
+        ["parameters"]["num_shots"]
+        == 4
+        for stage in gsm8k
+    )
+    assert all(
+        stage.semantic_settings["prompt_population"]["dataset"]
+        ["selection"]["count"]
+        == 164
+        and stage.semantic_settings["prompt_population"]["prompt_policy"]
+        ["parameters"]["num_shots"]
+        == 0
+        for stage in humaneval
+    )
+
+    report = next(
+        stage
+        for stage in plan.stages
+        if stage.kind == "result-aggregation"
+    )
+    assert len(report.input_instances) == 4
+    assert report.semantic_settings == {
+        "recipe": "downstream-performance",
+        "confidence_level": 0.95,
+        "threshold_policy": {"default": 0.00001},
+        "significance_levels": [],
+    }
+
+
 def test_usenix_robustness_plan_matches_the_500_plus_500_design(monkeypatch):
     plan = resolve_path(
         USENIX_PLAN_DIRECTORY / "robustness-qwen25-3b-instruct.yaml",

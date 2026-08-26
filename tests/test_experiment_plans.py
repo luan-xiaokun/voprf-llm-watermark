@@ -268,10 +268,6 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
     assert null_detection.semantic_settings["detector_watermark"][
         "window_size"
     ] == 2
-    assert null_detection.semantic_settings["detector_watermark"][
-        "delta"
-    ] == 2.5
-
     token_generation = next(
         stage
         for stage in plan.stages
@@ -292,7 +288,7 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
         "enabled": True,
         "window_size": 2,
         "gamma": 0.5,
-        "delta": 3.0,
+        "delta": 2.5,
         "server_seed_path": token_generation.semantic_settings[
             "watermark"
         ]["server_seed_path"],
@@ -306,7 +302,7 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
         for stage in multinomial_grid.stages
         if stage.stage_name == "generate_vow_multinomial"
         and stage.semantic_settings["watermark"]["gamma"] == 0.5
-        and stage.semantic_settings["watermark"]["delta"] == 3.0
+        and stage.semantic_settings["watermark"]["delta"] == 2.5
     )
     assert (
         token_generation.semantic_settings
@@ -414,6 +410,44 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
     assert len(
         reports["assemble_vow_h2_top50_tpr_vs_ppl"].input_instances
     ) == 99
+
+
+def test_usenix_vow_h2_token_length_plan_contract(monkeypatch):
+    plan = resolve_path(
+        USENIX_PLAN_DIRECTORY
+        / "vow-h2-token-length-qwen25-3b-1000.yaml",
+        monkeypatch,
+    )
+    multinomial_grid = resolve_path(
+        USENIX_PLAN_DIRECTORY
+        / "vow-h2-parameter-grid-qwen25-3b-1000.yaml",
+        monkeypatch,
+    )
+
+    assert len(plan.stages) == 3
+    generation = next(
+        stage for stage in plan.stages if stage.kind == "generation"
+    )
+    grid_generation = next(
+        stage
+        for stage in multinomial_grid.stages
+        if stage.stage_name == "generate_vow_multinomial"
+        and stage.semantic_settings["watermark"]["gamma"] == 0.5
+        and stage.semantic_settings["watermark"]["delta"] == 3.0
+    )
+    assert generation.semantic_settings == grid_generation.semantic_settings
+
+    detection = next(
+        stage for stage in plan.stages if stage.kind == "detection"
+    )
+    assert detection.semantic_settings["step_size"] == 5
+    assert detection.semantic_settings["significance_levels"] == [0.00001]
+
+    report = next(
+        stage for stage in plan.stages if stage.kind == "result-aggregation"
+    )
+    assert report.input_instances == (detection.instance_name,)
+    assert report.semantic_settings["recipe"] == "tpr-vs-token-length"
 
 
 def test_usenix_vow_h2_downstream_plan_contract(monkeypatch):

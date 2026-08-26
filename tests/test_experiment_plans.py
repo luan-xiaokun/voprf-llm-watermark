@@ -268,6 +268,9 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
     assert null_detection.semantic_settings["detector_watermark"][
         "window_size"
     ] == 2
+    assert null_detection.semantic_settings["detector_watermark"][
+        "delta"
+    ] == 2.5
 
     token_generation = next(
         stage
@@ -289,7 +292,7 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
         "enabled": True,
         "window_size": 2,
         "gamma": 0.5,
-        "delta": 2.5,
+        "delta": 3.0,
         "server_seed_path": token_generation.semantic_settings[
             "watermark"
         ]["server_seed_path"],
@@ -303,7 +306,7 @@ def test_usenix_vow_h2_remaining_experiments_plan_contract(monkeypatch):
         for stage in multinomial_grid.stages
         if stage.stage_name == "generate_vow_multinomial"
         and stage.semantic_settings["watermark"]["gamma"] == 0.5
-        and stage.semantic_settings["watermark"]["delta"] == 2.5
+        and stage.semantic_settings["watermark"]["delta"] == 3.0
     )
     assert (
         token_generation.semantic_settings
